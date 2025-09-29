@@ -1,0 +1,23 @@
+{
+  "name": "evmtracer",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@types/node": "^24.5.2",
+    "abi-decoder": "^2.4.0",
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2",
+    "ethers": "^6.15.0",
+    "typescript": "^5.9.2"
+  }
+}
