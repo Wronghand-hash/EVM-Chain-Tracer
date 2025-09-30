@@ -26,9 +26,9 @@ interface SwapEvent {
   amount0: bigint;
   amount1: bigint;
   protocol: "V2" | "V3";
-  tick?: number; // V3-specific
-  sqrtPriceX96?: bigint; // V3-specific
-  liquidity?: bigint; // V3-specific
+  tick?: number;
+  sqrtPriceX96?: bigint;
+  liquidity?: bigint;
 }
 
 interface TradeEvent {
@@ -39,6 +39,7 @@ interface TradeEvent {
   usdPrice: string;
   nativePrice: string;
   volume: string;
+  inputVolume: string; // Added for input token amount (e.g., AEVO)
   mint: string;
   type: "BUY" | "SELL" | "UNKNOWN";
   pairAddress?: string;
@@ -57,15 +58,16 @@ const erc20Abi = [
   "function symbol() view returns (string)",
   "function name() view returns (string)",
 ];
+
 const erc20TransferAbi = [
   "event Transfer(address indexed from, address indexed to, uint256 value)",
 ];
+
 const poolAbi = [
   "function token0() view returns (address)",
   "function token1() view returns (address)",
 ];
 
-// V2 Swap ABI
 const v2SwapAbi = [
   {
     anonymous: false,
@@ -107,7 +109,6 @@ const v2SwapAbi = [
   },
 ];
 
-// V3 Swap ABI
 const v3SwapAbi = [
   {
     anonymous: false,
@@ -163,11 +164,12 @@ const UNKNOWN_TOKEN_INFO: TokenInfo = {
 
 const WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4f27eAD9083C756Cc2".toLowerCase();
 const UNISWAP_UNIVERSAL_ROUTER_ADDRESS =
-  "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD".toLowerCase(); // Example mainnet address
+  "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD".toLowerCase();
 
 const v2SwapIface = new Interface(v2SwapAbi);
 const v3SwapIface = new Interface(v3SwapAbi);
 const transferIface = new Interface(erc20TransferAbi);
+
 const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
 const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
 const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
@@ -175,12 +177,10 @@ const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
 const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
 
 // --- Core Functions ---
-
 async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
   const addressLower = tokenAddress.toLowerCase();
   if (addressLower === WETH_ADDRESS)
     return { decimals: 18, symbol: "WETH", name: "Wrapped Ether" };
-
   const contract = new Contract(tokenAddress, erc20Abi, provider);
   try {
     const [decimals, symbol, name] = await Promise.all([
@@ -229,7 +229,6 @@ async function isV2Pool(poolAddress: string): Promise<boolean> {
       provider
     );
     const v2Factory = (await universalRouterContract.v2Factory()).toLowerCase();
-    const v3Factory = (await universalRouterContract.v3Factory()).toLowerCase();
     return factory === v2Factory;
   } catch {
     return false; // Default to V3 if factory check fails
@@ -267,7 +266,6 @@ async function analyzeTransaction(txHash: string): Promise<void> {
       `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
     );
 
-    // Check if transaction is to Universal Router
     const isUniversalRouter =
       routerAddress === UNISWAP_UNIVERSAL_ROUTER_ADDRESS;
     let commands: string = "";
@@ -292,7 +290,6 @@ async function analyzeTransaction(txHash: string): Promise<void> {
       const topic0 = log.topics[0].toLowerCase();
       const logAddrLower = log.address.toLowerCase();
       tokenAddresses.add(logAddrLower);
-
       if (
         topic0 === V2_SWAP_EVENT_TOPIC?.toLowerCase() ||
         topic0 === V3_SWAP_EVENT_TOPIC?.toLowerCase()
@@ -382,7 +379,6 @@ async function analyzeTransaction(txHash: string): Promise<void> {
       const token0Info = tokenInfos[token0] || UNKNOWN_TOKEN_INFO;
       const token1Info = tokenInfos[token1] || UNKNOWN_TOKEN_INFO;
 
-      // Determine input/output based on protocol
       let isToken0In: boolean;
       let inputTokenAddress: string;
       let outputTokenAddress: string;
@@ -400,7 +396,7 @@ async function analyzeTransaction(txHash: string): Promise<void> {
         swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
         swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
       } else {
-        isToken0In = swap.amount0 > 0n; // amount0In > 0 means token0 was input
+        isToken0In = swap.amount0 > 0n;
         inputTokenAddress = isToken0In ? token0 : token1;
         outputTokenAddress = isToken0In ? token1 : token0;
         inputInfo = isToken0In ? token0Info : token1Info;
@@ -411,7 +407,6 @@ async function analyzeTransaction(txHash: string): Promise<void> {
 
       const finalAmountIn = swapAmountIn;
       const finalAmountOut = swapAmountOut;
-
       const amountInDecimal = ethers.formatUnits(
         finalAmountIn,
         inputInfo.decimals
@@ -420,7 +415,6 @@ async function analyzeTransaction(txHash: string): Promise<void> {
         finalAmountOut,
         outputInfo.decimals
       );
-
       const nativePrice =
         parseFloat(amountOutDecimal) > 0
           ? (
@@ -456,6 +450,7 @@ async function analyzeTransaction(txHash: string): Promise<void> {
         usdPrice: "0.00",
         nativePrice,
         volume: amountOutDecimal,
+        inputVolume: amountInDecimal, // Added for input amount (e.g., AEVO)
         mint: outputTokenAddress,
         type:
           outputInfo.symbol === "WETH" || outputInfo.symbol === "USDC"
