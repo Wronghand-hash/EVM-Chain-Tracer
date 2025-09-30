@@ -1,10 +1,8 @@
 import { ethers, Interface, Contract } from "ethers";
 import * as dotenv from "dotenv";
-// Assuming these ABI files exist relative to the script
-import uniswapV2Abi from "./abi/uniswapV2Abi.json";
 import uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 
-// Load environment variables for provider URL
+// Load environment variables
 dotenv.config();
 
 // --- Interfaces ---
@@ -13,21 +11,27 @@ interface TokenInfo {
   symbol: string;
   name: string;
 }
+
 interface Transfer {
   token: string;
   from: string;
   to: string;
   value: bigint;
 }
+
 interface SwapEvent {
   pool: string;
   sender: string;
   recipient: string;
   amount0: bigint;
   amount1: bigint;
-  tick?: number;
+  protocol: "V2" | "V3";
+  tick?: number; // V3-specific
+  sqrtPriceX96?: bigint; // V3-specific
+  liquidity?: bigint; // V3-specific
 }
-export interface TradeEvent {
+
+interface TradeEvent {
   event: string;
   status: string;
   txHash: string;
@@ -39,15 +43,72 @@ export interface TradeEvent {
   type: "BUY" | "SELL" | "UNKNOWN";
   pairAddress?: string;
   programId: string;
-  quoteToken: string; // The address of the token being sold/input
-  baseDecimals: number; // Decimals of the token being bought/output
-  quoteDecimals: number; // Decimals of the token being sold/input
+  quoteToken: string;
+  baseDecimals: number;
+  quoteDecimals: number;
   tradeType: string;
   walletAddress: string;
+  protocol: "V2" | "V3";
 }
 
 // --- Constants & ABIs ---
-const uniswapV3SwapAbi = [
+const erc20Abi = [
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+];
+const erc20TransferAbi = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
+];
+const poolAbi = [
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+];
+
+// V2 Swap ABI
+const v2SwapAbi = [
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: true,
+        internalType: "address",
+        name: "sender",
+        type: "address",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "amount0In",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "amount1In",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "amount0Out",
+        type: "uint256",
+      },
+      {
+        indexed: false,
+        internalType: "uint256",
+        name: "amount1Out",
+        type: "uint256",
+      },
+      { indexed: true, internalType: "address", name: "to", type: "address" },
+    ],
+    name: "Swap",
+    type: "event",
+  },
+];
+
+// V3 Swap ABI
+const v3SwapAbi = [
   {
     anonymous: false,
     inputs: [
@@ -93,18 +154,6 @@ const uniswapV3SwapAbi = [
     type: "event",
   },
 ];
-const erc20Abi = [
-  "function decimals() view returns (uint8)",
-  "function symbol() view returns (string)",
-  "function name() view returns (string)",
-];
-const erc20TransferAbi = [
-  "event Transfer(address indexed from, address indexed to, uint256 value)",
-];
-const poolAbi = [
-  "function token0() view returns (address)",
-  "function token1() view returns (address)",
-];
 
 const UNKNOWN_TOKEN_INFO: TokenInfo = {
   decimals: 18,
@@ -112,23 +161,21 @@ const UNKNOWN_TOKEN_INFO: TokenInfo = {
   name: "Unknown Token",
 };
 
-const ifaceV3 = new Interface(uniswapV3SwapAbi);
-// const ifaceV2 = new Interface(uniswapV2Abi); // Not used in log parsing yet
-// const ifaceUniversal = new Interface(uniswapUniversalAbi); // Not used in log parsing yet
-const transferIface = new Interface(erc20TransferAbi);
-const SWAP_EVENT_TOPIC_V3 = ifaceV3.getEvent("Swap")?.topicHash;
-const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
 const WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4f27eAD9083C756Cc2".toLowerCase();
+const UNISWAP_UNIVERSAL_ROUTER_ADDRESS =
+  "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD".toLowerCase(); // Example mainnet address
+
+const v2SwapIface = new Interface(v2SwapAbi);
+const v3SwapIface = new Interface(v3SwapAbi);
+const transferIface = new Interface(erc20TransferAbi);
+const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
+const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
+const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
 
 const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
 
 // --- Core Functions ---
 
-/**
- * Fetches standard ERC-20 token info (decimals, symbol, name).
- * Uses WETH fallback for a known native token wrapper address.
- * No hardcoded addresses other than WETH are used.
- */
 async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
   const addressLower = tokenAddress.toLowerCase();
   if (addressLower === WETH_ADDRESS)
@@ -143,14 +190,10 @@ async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
     ]);
     return { decimals: Number(decimals), symbol, name };
   } catch {
-    // Generic fallback if contract call fails (e.g., token is non-standard)
     return UNKNOWN_TOKEN_INFO;
   }
 }
 
-/**
- * Fetches token0 and token1 addresses from a pool contract (works for V2/V3).
- */
 async function getPoolTokens(
   poolAddress: string
 ): Promise<{ token0: string; token1: string }> {
@@ -167,13 +210,30 @@ async function getPoolTokens(
   }
 }
 
-/**
- * Formats a BigInt amount into a human-readable string with symbol.
- */
 function formatAmount(value: bigint, decimals: number, symbol: string): string {
-  // Ensure positive value for formatting, as it represents an absolute amount
   const absoluteValue = value < 0n ? -value : value;
   return `${ethers.formatUnits(absoluteValue, decimals)} ${symbol}`;
+}
+
+async function isV2Pool(poolAddress: string): Promise<boolean> {
+  const poolContract = new Contract(
+    poolAddress,
+    ["function factory() view returns (address)"],
+    provider
+  );
+  try {
+    const factory = (await poolContract.factory()).toLowerCase();
+    const universalRouterContract = new Contract(
+      UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
+      uniswapUniversalAbi,
+      provider
+    );
+    const v2Factory = (await universalRouterContract.v2Factory()).toLowerCase();
+    const v3Factory = (await universalRouterContract.v3Factory()).toLowerCase();
+    return factory === v2Factory;
+  } catch {
+    return false; // Default to V3 if factory check fails
+  }
 }
 
 async function analyzeTransaction(txHash: string): Promise<void> {
@@ -205,7 +265,22 @@ async function analyzeTransaction(txHash: string): Promise<void> {
     );
     console.log(
       `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
-    ); // Parse Logs
+    );
+
+    // Check if transaction is to Universal Router
+    const isUniversalRouter =
+      routerAddress === UNISWAP_UNIVERSAL_ROUTER_ADDRESS;
+    let commands: string = "";
+    let inputs: string[] = [];
+    if (isUniversalRouter) {
+      const iface = new Interface(uniswapUniversalAbi);
+      const parsed = iface.parseTransaction({ data: transaction.data });
+      if (parsed?.name === "execute") {
+        commands = parsed.args.commands;
+        inputs = parsed.args.inputs;
+        console.log(`Universal Router Commands: ${commands}`);
+      }
+    }
 
     const transfers: Transfer[] = [];
     const swaps: SwapEvent[] = [];
@@ -218,25 +293,46 @@ async function analyzeTransaction(txHash: string): Promise<void> {
       const logAddrLower = log.address.toLowerCase();
       tokenAddresses.add(logAddrLower);
 
-      if (topic0 === SWAP_EVENT_TOPIC_V3?.toLowerCase()) {
+      if (
+        topic0 === V2_SWAP_EVENT_TOPIC?.toLowerCase() ||
+        topic0 === V3_SWAP_EVENT_TOPIC?.toLowerCase()
+      ) {
         try {
-          const parsed = ifaceV3.parseLog(log);
+          const isV2 = await isV2Pool(logAddrLower);
+          const iface = isV2 ? v2SwapIface : v3SwapIface;
+          const parsed = iface.parseLog(log);
           if (parsed) {
-            swaps.push({
-              pool: log.address.toLowerCase(),
+            const protocol = isV2 ? "V2" : "V3";
+            const swapEvent: SwapEvent = {
+              pool: logAddrLower,
               sender: parsed.args.sender.toLowerCase(),
-              recipient: parsed.args.recipient.toLowerCase(),
-              amount0: parsed.args.amount0 as bigint, // Explicitly cast
-              amount1: parsed.args.amount1 as bigint, // Explicitly cast
+              recipient:
+                parsed.args.recipient?.toLowerCase() ||
+                parsed.args.to?.toLowerCase(),
+              amount0:
+                protocol === "V3"
+                  ? parsed.args.amount0
+                  : parsed.args.amount0In > 0
+                  ? parsed.args.amount0In
+                  : -parsed.args.amount0Out,
+              amount1:
+                protocol === "V3"
+                  ? parsed.args.amount1
+                  : parsed.args.amount1In > 0
+                  ? parsed.args.amount1In
+                  : -parsed.args.amount1Out,
+              protocol,
               tick: parsed.args.tick,
-            });
+              sqrtPriceX96: parsed.args.sqrtPriceX96,
+              liquidity: parsed.args.liquidity,
+            };
+            swaps.push(swapEvent);
             poolAddresses.add(logAddrLower);
           }
         } catch (e) {
-          // Attempt to parse as V2/other ABI if V3 fails
-          try {
-            // V2 swap logic would go here if implemented with V2 ABI
-          } catch {}
+          console.warn(
+            `Failed to parse Swap event for log: ${log.transactionHash}`
+          );
         }
       } else if (topic0 === TRANSFER_TOPIC?.toLowerCase()) {
         try {
@@ -251,48 +347,67 @@ async function analyzeTransaction(txHash: string): Promise<void> {
           }
         } catch {}
       }
-    } // Fetch Metadata
+    }
 
     const tokenInfos: { [address: string]: TokenInfo } = {};
     const poolTokens: { [pool: string]: { token0: string; token1: string } } =
       {};
     await Promise.all([
-      // Fetch all token info concurrently
       ...Array.from(tokenAddresses).map((t) =>
         getTokenInfo(t).then((info) => (tokenInfos[t] = info))
-      ), // Fetch all pool token addresses concurrently
+      ),
       ...Array.from(poolAddresses).map((p) =>
         getPoolTokens(p).then((tokens) => (poolTokens[p] = tokens))
       ),
-    ]); // Process Swaps and Construct TradeEvents
+    ]);
 
     const tradeEvents: TradeEvent[] = [];
     for (const [index, swap] of swaps.entries()) {
-      console.log(`\n===== Swap ${index + 1} (V3, Pool: ${swap.pool}) =====`);
+      console.log(
+        `\n===== Swap ${index + 1} (${swap.protocol}, Pool: ${swap.pool}) =====`
+      );
       console.log(`Sender: ${swap.sender} | Recipient: ${swap.recipient}`);
       console.log(
-        `Amount0: ${swap.amount0} | Amount1: ${swap.amount1} | Tick: ${swap.tick}`
+        `Amount0: ${swap.amount0} | Amount1: ${swap.amount1} | Tick: ${
+          swap.tick || "N/A"
+        }`
       );
 
       const { token0, token1 } = poolTokens[swap.pool] || {
         token0: "",
         token1: "",
       };
-      if (!token0 || !token1) continue; // Token Info (Use fetched info or generic fallback)
+      if (!token0 || !token1) continue;
 
       const token0Info = tokenInfos[token0] || UNKNOWN_TOKEN_INFO;
-      const token1Info = tokenInfos[token1] || UNKNOWN_TOKEN_INFO; // --- FIX: Correctly determine Input/Output based on sign --- // amount0 > 0 means token0 was sold/input by the user/router
+      const token1Info = tokenInfos[token1] || UNKNOWN_TOKEN_INFO;
 
-      const isToken0In = swap.amount0 > 0n;
+      // Determine input/output based on protocol
+      let isToken0In: boolean;
+      let inputTokenAddress: string;
+      let outputTokenAddress: string;
+      let inputInfo: TokenInfo;
+      let outputInfo: TokenInfo;
+      let swapAmountIn: bigint;
+      let swapAmountOut: bigint;
 
-      const inputTokenAddress = isToken0In ? token0 : token1;
-      const outputTokenAddress = isToken0In ? token1 : token0;
-
-      const inputInfo = isToken0In ? token0Info : token1Info;
-      const outputInfo = isToken0In ? token1Info : token0Info; // Input amount is the positive one
-
-      const swapAmountIn = isToken0In ? swap.amount0 : swap.amount1; // Output amount is the absolute value of the negative one
-      const swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0; // Using swap amounts directly, as transfer events can be complicated in aggregated swaps
+      if (swap.protocol === "V3") {
+        isToken0In = swap.amount0 > 0n;
+        inputTokenAddress = isToken0In ? token0 : token1;
+        outputTokenAddress = isToken0In ? token1 : token0;
+        inputInfo = isToken0In ? token0Info : token1Info;
+        outputInfo = isToken0In ? token1Info : token0Info;
+        swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
+        swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
+      } else {
+        isToken0In = swap.amount0 > 0n; // amount0In > 0 means token0 was input
+        inputTokenAddress = isToken0In ? token0 : token1;
+        outputTokenAddress = isToken0In ? token1 : token0;
+        inputInfo = isToken0In ? token0Info : token1Info;
+        outputInfo = isToken0In ? token1Info : token0Info;
+        swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
+        swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
+      }
 
       const finalAmountIn = swapAmountIn;
       const finalAmountOut = swapAmountOut;
@@ -339,22 +454,23 @@ async function analyzeTransaction(txHash: string): Promise<void> {
         txHash,
         timestamp,
         usdPrice: "0.00",
-        nativePrice, // FIX: Use the actual amount received (output) as volume.
+        nativePrice,
         volume: amountOutDecimal,
-        mint: outputTokenAddress, // Keeping the user's logic for determining BUY/SELL
+        mint: outputTokenAddress,
         type:
           outputInfo.symbol === "WETH" || outputInfo.symbol === "USDC"
             ? "BUY"
             : "SELL",
         pairAddress: swap.pool,
         programId: routerAddress,
-        quoteToken: inputTokenAddress, // Input token address
+        quoteToken: inputTokenAddress,
         baseDecimals: outputInfo.decimals,
         quoteDecimals: inputInfo.decimals,
         tradeType: `${inputInfo.symbol} -> ${outputInfo.symbol}`,
         walletAddress: userWallet,
+        protocol: swap.protocol,
       });
-    } // Log Trade Events
+    }
 
     if (tradeEvents.length > 0) {
       tradeEvents.forEach((event, index) => {
@@ -386,12 +502,11 @@ async function analyzeTransaction(txHash: string): Promise<void> {
 
 async function main(): Promise<void> {
   if (!process.env.PROVIDER_URL) {
-    // This ensures the user sees this error if the environment is not set up
     console.error("ERROR: PROVIDER_URL not set in .env file.");
     return;
   }
   const txHashes = [
-    "0x8e6092d254d139b7f4c8253c4a15e8d520874fc0a3e2b9be45330c369b9534c2",
+    "0x200b0b0c00c1c7961719268718d605e289652b914e06caf91e91fa2c7b25b6af",
   ];
   for (const txHash of txHashes) {
     await analyzeTransaction(txHash);
