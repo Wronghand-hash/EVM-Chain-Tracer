@@ -12,8 +12,9 @@ export const erc20Abi = [
 
 // In constants.ts
 export const UNISWAP_V4_POOL_MANAGER_ADDRESS =
-  "0x57e3b2369631F4a7216eCdb2760aA4DDbC9eE4b7".toLowerCase(); // Uniswap V4 PoolManager on Ethereum mainnet
-export const V4_SWAP_EVENT_TOPIC = "0x000000000004444c5dc75cb358380d2e3de08a90";
+  "0x000000000004444c5dc75cb358380d2e3de08a90";
+export const V4_SWAP_EVENT_TOPIC =
+  "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
 export const v4SwapIface = new Interface(uniswapV4PoolManagerAbi);
 
 export const erc20TransferAbi = [

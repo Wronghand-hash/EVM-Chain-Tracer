@@ -23,6 +23,45 @@ import {
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
 
+// Add partial ParaSwap ABI for fallback decoding (from Etherscan)
+const paraSwapAbi = [
+  {
+    inputs: [
+      { internalType: "address", name: "executor", type: "address" },
+      {
+        components: [
+          { internalType: "address", name: "srcToken", type: "address" },
+          { internalType: "address", name: "destToken", type: "address" },
+          { internalType: "uint256", name: "fromAmount", type: "uint256" },
+          { internalType: "uint256", name: "toAmount", type: "uint256" },
+          { internalType: "uint256", name: "quotedAmount", type: "uint256" },
+          { internalType: "bytes32", name: "metadata", type: "bytes32" },
+          {
+            internalType: "address payable",
+            name: "beneficiary",
+            type: "address",
+          },
+        ],
+        internalType: "struct AugustusV6_2.GenericData",
+        name: "swapData",
+        type: "tuple",
+      },
+      { internalType: "uint256", name: "partnerAndFee", type: "uint256" },
+      { internalType: "bytes", name: "permit", type: "bytes" },
+      { internalType: "bytes", name: "executorData", type: "bytes" },
+    ],
+    name: "swapExactAmountIn",
+    outputs: [
+      { internalType: "uint256", name: "receivedAmount", type: "uint256" },
+      { internalType: "uint256", name: "paraswapShare", type: "uint256" },
+      { internalType: "uint256", name: "partnerShare", type: "uint256" },
+    ],
+    stateMutability: "payable",
+    type: "function",
+  },
+  // Add more if needed, e.g., swapExactAmountOut
+];
+
 export async function analyzeTransaction(txHash: string): Promise<void> {
   try {
     const receipt = await provider.getTransactionReceipt(txHash);
@@ -269,6 +308,28 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
   }
 }
 
+async function getPoolKeyFromPoolManager(
+  poolId: string
+): Promise<{ currency0: string; currency1: string } | null> {
+  try {
+    const poolManager = new ethers.Contract(
+      UNISWAP_V4_POOL_MANAGER_ADDRESS,
+      uniswapV4PoolManagerAbi,
+      provider
+    );
+    const poolKey = await poolManager.getPool(poolId);
+    return {
+      currency0: poolKey.currency0.toLowerCase(),
+      currency1: poolKey.currency1.toLowerCase(),
+    };
+  } catch (e) {
+    console.warn(
+      `Failed to query pool key for poolId ${poolId}: ${(e as Error).message}`
+    );
+    return null;
+  }
+}
+
 function collectSwapCalls(
   trace: any,
   poolManager: string,
@@ -316,6 +377,12 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
     );
 
+    // Debug: Print constants for verification
+    console.log(
+      `Debug: UNISWAP_V4_POOL_MANAGER_ADDRESS = ${UNISWAP_V4_POOL_MANAGER_ADDRESS}`
+    );
+    console.log(`Debug: V4_SWAP_EVENT_TOPIC = ${V4_SWAP_EVENT_TOPIC}`);
+
     const iface = new Interface(uniswapV4PoolManagerAbi);
     const swapSelector = iface.getFunction("swap")!.selector;
     const swaps: SwapEvent[] = [];
@@ -325,10 +392,29 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       [poolId: string]: { currency0: string; currency1: string };
     } = {};
 
+    // Collect transfers to infer tokens if needed
+    const transfers: Transfer[] = [];
+    for (const log of receipt.logs) {
+      if (log.topics[0]?.toLowerCase() === TRANSFER_TOPIC?.toLowerCase()) {
+        try {
+          const parsed = transferIface.parseLog(log);
+          if (parsed) {
+            transfers.push({
+              token: log.address.toLowerCase(),
+              from: parsed.args.from.toLowerCase(),
+              to: parsed.args.to.toLowerCase(),
+              value: parsed.args.value,
+            });
+            tokenAddresses.add(log.address.toLowerCase());
+          }
+        } catch {}
+      }
+    }
+
     // Get transaction trace to find internal swap calls
-    let trace;
+    let usedTrace = false;
     try {
-      trace = await provider.send("debug_traceTransaction", [
+      const trace = await provider.send("debug_traceTransaction", [
         txHash,
         { tracer: "callTracer" },
       ]);
@@ -359,19 +445,19 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           };
           tokenAddresses.add(key.currency0.toLowerCase());
           tokenAddresses.add(key.currency1.toLowerCase());
-        } catch (e) {
-          console.warn(
-            `Failed to decode swap call in trace: ${(e as Error).message}`
-          );
+        } catch {
+          console.warn(`Failed to decode swap call in trace.`);
         }
       }
-    } catch (e) {
+      usedTrace = true;
+    } catch {
       console.warn(
-        `Failed to get transaction trace: ${
-          (e as Error).message
-        }. Falling back to direct parsing.`
+        `Failed to get transaction trace. Falling back to direct parsing and logs.`
       );
-      // Fallback to direct parsing if trace not available
+    }
+
+    // Fallback: Direct parsing if to PoolManager
+    if (!usedTrace) {
       try {
         const parsed = iface.parseTransaction({ data: transaction.data });
         if (parsed?.name === "swap") {
@@ -395,15 +481,57 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           tokenAddresses.add(key.currency0.toLowerCase());
           tokenAddresses.add(key.currency1.toLowerCase());
         }
-      } catch {}
+      } catch (e) {
+        console.log(`Direct parsing failed: ${(e as Error).message}`);
+      }
     }
 
-    // Collect all Swap events from PoolManager
+    // Alternative fallback based on ABI if to ParaSwap router
+    const PARA_SWAP_ADDRESS = "0x6a000f20005980200259b80c5102003040001068";
+    if (!usedTrace && contractAddress === PARA_SWAP_ADDRESS) {
+      try {
+        const paraIface = new Interface(paraSwapAbi);
+        const parsed = paraIface.parseTransaction({ data: transaction.data });
+        if (parsed?.name === "swapExactAmountIn") {
+          const swapData = parsed.args.swapData;
+          const srcToken = swapData.srcToken.toLowerCase();
+          const destToken = swapData.destToken.toLowerCase();
+          tokenAddresses.add(srcToken);
+          tokenAddresses.add(destToken);
+          console.log(
+            `ParaSwap fallback: Inferred tokens from input - src: ${srcToken}, dest: ${destToken}`
+          );
+        }
+      } catch (e) {
+        console.log(`ParaSwap ABI decoding failed: ${(e as Error).message}`);
+      }
+    }
+
+    // Collect all Swap events from PoolManager (with enhanced debug logs)
     for (const log of receipt.logs) {
-      if (
-        log.address.toLowerCase() === UNISWAP_V4_POOL_MANAGER_ADDRESS &&
-        log.topics[0]?.toLowerCase() === V4_SWAP_EVENT_TOPIC?.toLowerCase()
-      ) {
+      const logAddrLower = log.address.toLowerCase();
+      const topic0Lower = log.topics[0]?.toLowerCase();
+      console.log(
+        `Debug: Log from address ${logAddrLower} with topic0 ${topic0Lower}`
+      );
+      const addrMatch = logAddrLower === UNISWAP_V4_POOL_MANAGER_ADDRESS;
+      const topicMatch = topic0Lower === V4_SWAP_EVENT_TOPIC?.toLowerCase();
+      if (addrMatch) {
+        console.log(`Debug: Address matches PoolManager`);
+      } else {
+        console.log(
+          `Debug: Address mismatch - expected: ${UNISWAP_V4_POOL_MANAGER_ADDRESS}, got: ${logAddrLower}`
+        );
+      }
+      if (topicMatch) {
+        console.log(`Debug: Topic matches V4_SWAP_EVENT_TOPIC`);
+      } else {
+        console.log(
+          `Debug: Topic mismatch - expected: ${V4_SWAP_EVENT_TOPIC?.toLowerCase()}, got: ${topic0Lower}`
+        );
+      }
+      if (addrMatch && topicMatch) {
+        console.log(`Debug: Matched V4 Swap log at index ${log.index}`);
         try {
           const parsedLog = v4SwapIface.parseLog(log);
           if (parsedLog) {
@@ -420,12 +548,21 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
               liquidity: parsedLog.args.liquidity,
             });
             poolIds.add(poolId);
+            console.log(
+              `Debug: Successfully parsed Swap event - poolId: ${poolId}`
+            );
+          } else {
+            console.log(`Debug: parseLog returned null/undefined`);
           }
         } catch (e) {
           console.warn(
-            `Failed to parse V4 Swap event for log: ${log.transactionHash}`
+            `Failed to parse V4 Swap event for log ${log.index}: ${
+              (e as Error).message
+            }`
           );
         }
+      } else {
+        console.log(`Debug: Log skipped (address or topic mismatch)`);
       }
     }
 
@@ -451,15 +588,51 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         `Amount0: ${swap.amount0} | Amount1: ${swap.amount1} | Tick: ${swap.tick}`
       );
 
-      const poolKey = poolKeys[swap.pool];
+      let poolKey: { currency0: string; currency1: string } | null =
+        poolKeys[swap.pool];
       if (!poolKey) {
-        console.warn(
-          `No pool key found for poolId: ${swap.pool}. Skipping token pair resolution.`
-        );
-        continue;
+        // Fallback: Query PoolManager for pool key
+        poolKey = await getPoolKeyFromPoolManager(swap.pool);
+        if (poolKey) {
+          poolKeys[swap.pool] = poolKey;
+          tokenAddresses.add(poolKey.currency0);
+          tokenAddresses.add(poolKey.currency1);
+          if (!tokenInfos[poolKey.currency0]) {
+            const info = await getTokenInfo(poolKey.currency0);
+            tokenInfos[poolKey.currency0] = info;
+          }
+          if (!tokenInfos[poolKey.currency1]) {
+            const info = await getTokenInfo(poolKey.currency1);
+            tokenInfos[poolKey.currency1] = info;
+          }
+        } else {
+          // Last resort: Infer from transfers
+          const relatedTransfers = transfers.filter(
+            (t) =>
+              (t.from === swap.sender || t.to === swap.recipient) &&
+              tokenAddresses.has(t.token)
+          );
+          const possibleTokens = [
+            ...new Set(relatedTransfers.map((t) => t.token)),
+          ];
+          if (possibleTokens.length >= 2) {
+            poolKey = {
+              currency0: possibleTokens[0],
+              currency1: possibleTokens[1],
+            };
+            console.warn(
+              `Inferred pool key for poolId ${swap.pool} from transfers: ${poolKey.currency0}/${poolKey.currency1}`
+            );
+          } else {
+            console.warn(
+              `No pool key found for poolId ${swap.pool}. Skipping swap.`
+            );
+            continue;
+          }
+        }
       }
-      const { currency0, currency1 } = poolKey;
 
+      const { currency0, currency1 } = poolKey;
       const token0Info = tokenInfos[currency0] || UNKNOWN_TOKEN_INFO;
       const token1Info = tokenInfos[currency1] || UNKNOWN_TOKEN_INFO;
       const isToken0In = swap.amount0 > 0n;
