@@ -1,5 +1,6 @@
 import { Interface, ethers } from "ethers";
 import { TokenInfo } from "./types";
+import * as uniswapV4PoolManagerAbi from "../abi/uniswapV4PoolManager.json";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -8,6 +9,14 @@ export const erc20Abi = [
   "function symbol() view returns (string)",
   "function name() view returns (string)",
 ];
+
+// In constants.ts
+export const UNISWAP_V4_POOL_MANAGER_ADDRESS =
+  "0x57e3b2369631F4a7216eCdb2760aA4DDbC9eE4b7".toLowerCase(); // Uniswap V4 PoolManager on Ethereum mainnet
+export const V4_SWAP_EVENT_TOPIC = ethers.id(
+  "Swap(bytes32,address,int256,int256,uint160,uint128,int24)"
+); // Exact topic hash for V4 Swap event
+export const v4SwapIface = new Interface(uniswapV4PoolManagerAbi);
 
 export const erc20TransferAbi = [
   "event Transfer(address indexed from, address indexed to, uint256 value)",

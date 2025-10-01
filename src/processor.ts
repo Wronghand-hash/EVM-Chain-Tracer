@@ -9,6 +9,9 @@ import {
   TRANSFER_TOPIC,
   transferIface,
   UNKNOWN_TOKEN_INFO,
+  V4_SWAP_EVENT_TOPIC,
+  UNISWAP_V4_POOL_MANAGER_ADDRESS,
+  v4SwapIface,
 } from "./types/constants";
 import { Transfer, SwapEvent, TokenInfo, TradeEvent } from "./types/types";
 import {
@@ -18,6 +21,7 @@ import {
   formatAmount,
 } from "./utils/utils";
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
+import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
 
 export async function analyzeTransaction(txHash: string): Promise<void> {
   try {
@@ -261,6 +265,293 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
   } catch (err) {
     console.error(
       `Error analyzing transaction ${txHash}: ${(err as Error).message}`
+    );
+  }
+}
+
+function collectSwapCalls(
+  trace: any,
+  poolManager: string,
+  swapSelector: string
+): any[] {
+  const swaps: any[] = [];
+  function recurse(call: any) {
+    if (
+      call.to?.toLowerCase() === poolManager &&
+      call.input?.startsWith(swapSelector)
+    ) {
+      swaps.push(call);
+    }
+    if (call.calls) {
+      call.calls.forEach(recurse);
+    }
+  }
+  recurse(trace);
+  return swaps;
+}
+
+export async function analyzeV4Transaction(txHash: string): Promise<void> {
+  try {
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (!receipt || receipt.status !== 1) {
+      console.log(`Transaction failed or not found: ${txHash}`);
+      return;
+    }
+    const transaction = await provider.getTransaction(txHash);
+    if (!transaction) throw new Error(`Transaction not found: ${txHash}`);
+    const block = await provider.getBlock(receipt.blockNumber);
+    const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
+    const userWallet = transaction.from.toLowerCase();
+    const contractAddress = transaction.to?.toLowerCase() || "0x";
+    console.log(`\n--- Analyzing V4 Transaction: ${txHash} ---`);
+    console.log(
+      `Status: Success ✅ | From: ${transaction.from} | To: ${transaction.to}`
+    );
+    console.log(
+      `Block: ${receipt.blockNumber} | Value: ${ethers.formatEther(
+        transaction.value
+      )} ETH`
+    );
+    console.log(
+      `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
+    );
+
+    const iface = new Interface(uniswapV4PoolManagerAbi);
+    const swapSelector = iface.getFunction("swap")!.selector;
+    const swaps: SwapEvent[] = [];
+    const tokenAddresses = new Set<string>();
+    const poolIds = new Set<string>();
+    const poolKeys: {
+      [poolId: string]: { currency0: string; currency1: string };
+    } = {};
+
+    // Get transaction trace to find internal swap calls
+    let trace;
+    try {
+      trace = await provider.send("debug_traceTransaction", [
+        txHash,
+        { tracer: "callTracer" },
+      ]);
+      const swapCalls = collectSwapCalls(
+        trace,
+        UNISWAP_V4_POOL_MANAGER_ADDRESS,
+        swapSelector
+      );
+      for (const swapCall of swapCalls) {
+        try {
+          const decoded = iface.decodeFunctionData("swap", swapCall.input);
+          const key = decoded[0]; // PoolKey
+          const poolId = ethers.keccak256(
+            ethers.AbiCoder.defaultAbiCoder().encode(
+              ["address", "address", "uint24", "int24", "address"],
+              [
+                key.currency0,
+                key.currency1,
+                key.fee,
+                key.tickSpacing,
+                key.hooks,
+              ]
+            )
+          );
+          poolKeys[poolId] = {
+            currency0: key.currency0.toLowerCase(),
+            currency1: key.currency1.toLowerCase(),
+          };
+          tokenAddresses.add(key.currency0.toLowerCase());
+          tokenAddresses.add(key.currency1.toLowerCase());
+        } catch (e) {
+          console.warn(
+            `Failed to decode swap call in trace: ${(e as Error).message}`
+          );
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `Failed to get transaction trace: ${
+          (e as Error).message
+        }. Falling back to direct parsing.`
+      );
+      // Fallback to direct parsing if trace not available
+      try {
+        const parsed = iface.parseTransaction({ data: transaction.data });
+        if (parsed?.name === "swap") {
+          const key = parsed.args.key;
+          const poolId = ethers.keccak256(
+            ethers.AbiCoder.defaultAbiCoder().encode(
+              ["address", "address", "uint24", "int24", "address"],
+              [
+                key.currency0,
+                key.currency1,
+                key.fee,
+                key.tickSpacing,
+                key.hooks,
+              ]
+            )
+          );
+          poolKeys[poolId] = {
+            currency0: key.currency0.toLowerCase(),
+            currency1: key.currency1.toLowerCase(),
+          };
+          tokenAddresses.add(key.currency0.toLowerCase());
+          tokenAddresses.add(key.currency1.toLowerCase());
+        }
+      } catch {}
+    }
+
+    // Collect all Swap events from PoolManager
+    for (const log of receipt.logs) {
+      if (
+        log.address.toLowerCase() === UNISWAP_V4_POOL_MANAGER_ADDRESS &&
+        log.topics[0]?.toLowerCase() === V4_SWAP_EVENT_TOPIC?.toLowerCase()
+      ) {
+        try {
+          const parsedLog = v4SwapIface.parseLog(log);
+          if (parsedLog) {
+            const poolId = ethers.hexlify(parsedLog.args.id);
+            swaps.push({
+              pool: poolId,
+              sender: parsedLog.args.sender.toLowerCase(),
+              recipient: parsedLog.args.recipient?.toLowerCase() || userWallet,
+              amount0: parsedLog.args.amount0,
+              amount1: parsedLog.args.amount1,
+              protocol: "V4",
+              tick: parsedLog.args.tick,
+              sqrtPriceX96: parsedLog.args.sqrtPriceX96,
+              liquidity: parsedLog.args.liquidity,
+            });
+            poolIds.add(poolId);
+          }
+        } catch (e) {
+          console.warn(
+            `Failed to parse V4 Swap event for log: ${log.transactionHash}`
+          );
+        }
+      }
+    }
+
+    if (swaps.length === 0) {
+      console.log("No V4 Swap events found.");
+      return;
+    }
+
+    // Fetch token info
+    const tokenInfos: { [address: string]: TokenInfo } = {};
+    await Promise.all(
+      Array.from(tokenAddresses).map((t) =>
+        getTokenInfo(t).then((info) => (tokenInfos[t] = info))
+      )
+    );
+
+    // Process each swap
+    const tradeEvents: TradeEvent[] = [];
+    for (const [index, swap] of swaps.entries()) {
+      console.log(`\n===== V4 Swap ${index + 1} (PoolId: ${swap.pool}) =====`);
+      console.log(`Sender: ${swap.sender} | Recipient: ${swap.recipient}`);
+      console.log(
+        `Amount0: ${swap.amount0} | Amount1: ${swap.amount1} | Tick: ${swap.tick}`
+      );
+
+      const poolKey = poolKeys[swap.pool];
+      if (!poolKey) {
+        console.warn(
+          `No pool key found for poolId: ${swap.pool}. Skipping token pair resolution.`
+        );
+        continue;
+      }
+      const { currency0, currency1 } = poolKey;
+
+      const token0Info = tokenInfos[currency0] || UNKNOWN_TOKEN_INFO;
+      const token1Info = tokenInfos[currency1] || UNKNOWN_TOKEN_INFO;
+      const isToken0In = swap.amount0 > 0n;
+      const inputTokenAddress = isToken0In ? currency0 : currency1;
+      const outputTokenAddress = isToken0In ? currency1 : currency0;
+      const inputInfo = isToken0In ? token0Info : token1Info;
+      const outputInfo = isToken0In ? token1Info : token0Info;
+      const swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
+      const swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
+
+      const amountInDecimal = ethers.formatUnits(
+        swapAmountIn,
+        inputInfo.decimals
+      );
+      const amountOutDecimal = ethers.formatUnits(
+        swapAmountOut,
+        outputInfo.decimals
+      );
+      const nativePrice =
+        parseFloat(amountOutDecimal) > 0
+          ? (
+              parseFloat(amountInDecimal) / parseFloat(amountOutDecimal)
+            ).toFixed(10)
+          : "0";
+
+      console.log(`\n--- Formatted V4 Swap ${index + 1} ---`);
+      console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
+      console.log(
+        `Input: ${formatAmount(
+          swapAmountIn,
+          inputInfo.decimals,
+          inputInfo.symbol
+        )}`
+      );
+      console.log(
+        `Output: ${formatAmount(
+          swapAmountOut,
+          outputInfo.decimals,
+          outputInfo.symbol
+        )}`
+      );
+      console.log(
+        `Price: ${nativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`
+      );
+
+      tradeEvents.push({
+        event: `Swap${index + 1}`,
+        status: "Success ✅",
+        txHash,
+        timestamp,
+        usdPrice: "0.00",
+        nativePrice,
+        volume: amountOutDecimal,
+        inputVolume: amountInDecimal,
+        mint: outputTokenAddress,
+        type:
+          outputInfo.symbol === "WETH" || outputInfo.symbol === "USDC"
+            ? "BUY"
+            : "SELL",
+        pairAddress: swap.pool,
+        programId: contractAddress,
+        quoteToken: inputTokenAddress,
+        baseDecimals: outputInfo.decimals,
+        quoteDecimals: inputInfo.decimals,
+        tradeType: `${inputInfo.symbol} -> ${outputInfo.symbol}`,
+        walletAddress: userWallet,
+        protocol: "V4",
+      });
+    }
+
+    if (tradeEvents.length > 0) {
+      tradeEvents.forEach((event, index) => {
+        console.log(
+          `\n${"=".repeat(30)}\nFINAL TRADE EVENT ${index + 1}\n${"=".repeat(
+            30
+          )}`
+        );
+        console.log(
+          JSON.stringify(
+            event,
+            (key, value) =>
+              typeof value === "bigint" ? value.toString() : value,
+            2
+          )
+        );
+      });
+    } else {
+      console.log("\n⚠️ No valid V4 TradeEvents constructed.");
+    }
+  } catch (err) {
+    console.error(
+      `Error analyzing V4 transaction ${txHash}: ${(err as Error).message}`
     );
   }
 }
