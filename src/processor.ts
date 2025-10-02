@@ -19,6 +19,7 @@ import {
   getTokenInfo,
   getPoolTokens,
   formatAmount,
+  fetchEthPriceUsd,
 } from "./utils/utils";
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
@@ -79,6 +80,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
     const userWallet = transaction.from.toLowerCase();
     const routerAddress = transaction.to?.toLowerCase() || "0x";
+    const ethUsd = (await fetchEthPriceUsd()) || 0;
     console.log(`\n--- Analyzing Transaction: ${txHash} ---`);
     console.log(
       `Status: Success ✅ | From: ${transaction.from} | To: ${transaction.to}`
@@ -237,6 +239,12 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
               parseFloat(amountInDecimal) / parseFloat(amountOutDecimal)
             ).toFixed(10)
           : "0";
+      let usdPrice = "0.00";
+      if (outputInfo.symbol === "WETH") {
+        usdPrice = (parseFloat(amountOutDecimal) * ethUsd).toFixed(2);
+      } else if (outputInfo.symbol === "USDC") {
+        usdPrice = parseFloat(amountOutDecimal).toFixed(2);
+      }
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
       console.log(
@@ -261,7 +269,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         status: "Success ✅",
         txHash,
         timestamp,
-        usdPrice: "0.00",
+        usdPrice,
         nativePrice,
         volume: amountOutDecimal,
         inputVolume: amountInDecimal,
