@@ -9,6 +9,7 @@ import {
 } from "../types/constants";
 import { TokenInfo } from "../types/types";
 import * as uniswapUniversalAbi from "../abi/uniswapUniversalAbi.json";
+import axios from "axios";
 
 export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
   const addressLower = tokenAddress.toLowerCase();
@@ -69,5 +70,18 @@ export async function isV2Pool(poolAddress: string): Promise<boolean> {
     return factory === v2Factory;
   } catch {
     return false; // Default to V3 if factory check fails
+  }
+}
+
+export async function fetchEthPriceUsd(): Promise<number | null> {
+  const url =
+    "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
+  try {
+    const response = await axios.get(url);
+    const data = response.data;
+    return data.ethereum.usd;
+  } catch (error) {
+    console.error("Error fetching ETH price:", error);
+    return null;
   }
 }
