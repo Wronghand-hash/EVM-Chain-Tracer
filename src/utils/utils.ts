@@ -6,6 +6,7 @@ import {
   UNKNOWN_TOKEN_INFO,
   WETH_ADDRESS,
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
+  V3_SLOT0_ABI,
 } from "../types/constants";
 import { TokenInfo } from "../types/types";
 import * as uniswapUniversalAbi from "../abi/uniswapUniversalAbi.json";
@@ -54,22 +55,12 @@ export function formatAmount(
 }
 
 export async function isV2Pool(poolAddress: string): Promise<boolean> {
-  const poolContract = new Contract(
-    poolAddress,
-    ["function factory() view returns (address)"],
-    provider
-  );
+  const poolContract = new Contract(poolAddress, V3_SLOT0_ABI, provider);
   try {
-    const factory = (await poolContract.factory()).toLowerCase();
-    const universalRouterContract = new Contract(
-      UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
-      uniswapUniversalAbi,
-      provider
-    );
-    const v2Factory = (await universalRouterContract.v2Factory()).toLowerCase();
-    return factory === v2Factory;
+    await poolContract.slot0(); // V3 succeeds; V2 reverts
+    return false;
   } catch {
-    return false; // Default to V3 if factory check fails
+    return true; // topic match implies pool
   }
 }
 
