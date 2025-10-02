@@ -26,6 +26,12 @@ export const poolAbi = [
   "function token1() view returns (address)",
 ];
 
+export const V2_SYNC_EVENT_TOPIC =
+  "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1";
+export const v2SyncIface = new Interface([
+  "event Sync(uint112 reserve0, uint112 reserve1)",
+]);
+
 export const V3_SLOT0_ABI = [
   "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
 ];

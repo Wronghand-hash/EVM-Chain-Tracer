@@ -12,6 +12,9 @@ import {
   V4_SWAP_EVENT_TOPIC,
   UNISWAP_V4_POOL_MANAGER_ADDRESS,
   v4SwapIface,
+  WETH_ADDRESS,
+  V2_SYNC_EVENT_TOPIC,
+  v2SyncIface,
 } from "./types/constants";
 import { Transfer, SwapEvent, TokenInfo, TradeEvent } from "./types/types";
 import {
@@ -110,6 +113,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const swaps: SwapEvent[] = [];
     const tokenAddresses = new Set<string>();
     const poolAddresses = new Set<string>();
+    const poolReserves: {
+      [pool: string]: { reserve0: bigint; reserve1: bigint };
+    } = {};
     for (const log of receipt.logs) {
       if (!log.topics[0]) continue;
       const topic0 = log.topics[0].toLowerCase();
@@ -168,6 +174,22 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
             });
           }
         } catch {}
+      } else if (topic0 === V2_SYNC_EVENT_TOPIC?.toLowerCase()) {
+        try {
+          const parsed = v2SyncIface.parseLog(log);
+          if (parsed) {
+            poolReserves[logAddrLower] = {
+              reserve0: parsed.args.reserve0,
+              reserve1: parsed.args.reserve1,
+            };
+            poolAddresses.add(logAddrLower);
+            console.log(
+              `Sync reserves for ${logAddrLower}: reserve0=${poolReserves[logAddrLower].reserve0}, reserve1=${poolReserves[logAddrLower].reserve1}`
+            );
+          }
+        } catch (e) {
+          console.warn(`Failed to parse Sync event: ${e}`);
+        }
       }
     }
     const tokenInfos: { [address: string]: TokenInfo } = {};
@@ -233,18 +255,76 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         finalAmountOut,
         outputInfo.decimals
       );
-      const nativePrice =
-        parseFloat(amountOutDecimal) > 0
-          ? (
-              parseFloat(amountInDecimal) / parseFloat(amountOutDecimal)
-            ).toFixed(10)
-          : "0";
-      let usdPrice = "0.00";
-      if (outputInfo.symbol === "WETH") {
-        usdPrice = (parseFloat(amountOutDecimal) * ethUsd).toFixed(2);
-      } else if (outputInfo.symbol === "USDC") {
-        usdPrice = parseFloat(amountOutDecimal).toFixed(2);
+
+      // Helper for human-readable formatting (updated for fixed decimals on tiny values)
+      const formatTinyNum = (num: number, isUsd: boolean = false): string => {
+        if (num === 0) return isUsd ? "$0.00" : "0";
+        if (num >= 0.01) {
+          return isUsd ? `$${num.toFixed(2)}` : num.toFixed(10);
+        } else if (num >= 1e-6) {
+          return isUsd ? `$${num.toFixed(6)}` : num.toFixed(6);
+        } else {
+          const fixed = parseFloat(num.toFixed(8));
+          return isUsd ? `$${fixed.toString()}` : fixed.toString();
+        }
+      };
+
+      // Spot price calc with BigInt for V2
+      let spotNativePrice = "0";
+      let spotUsdPrice = "$0.00";
+      let hasReserves = false;
+      let spotNum =
+        parseFloat(amountInDecimal) / parseFloat(amountOutDecimal) || 0; // Default to effective
+      if (swap.protocol === "V2") {
+        const reserves = poolReserves[swap.pool];
+        if (reserves) {
+          hasReserves = true;
+          let reserveIn: bigint, reserveOut: bigint;
+          if (isToken0In) {
+            reserveIn = reserves.reserve0;
+            reserveOut = reserves.reserve1;
+          } else {
+            reserveIn = reserves.reserve1;
+            reserveOut = reserves.reserve0;
+          }
+          const decDiffSpot = inputInfo.decimals - outputInfo.decimals;
+          let ratioBi: bigint;
+          if (decDiffSpot >= 0) {
+            ratioBi = (reserveIn * 10n ** BigInt(decDiffSpot)) / reserveOut;
+          } else {
+            ratioBi = reserveIn / (reserveOut * 10n ** BigInt(-decDiffSpot));
+          }
+          spotNum = Number(ratioBi) || spotNum;
+        }
+        if (!hasReserves) {
+          console.log(
+            "Debug: No reserves found for V2 pool, using effective price"
+          );
+        }
+      } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
+        const sqrtPrice = Number(swap.sqrtPriceX96) / Math.pow(2, 96);
+        const priceToken1PerToken0 = sqrtPrice ** 2;
+        const decDiff = token1Info.decimals - token0Info.decimals;
+        const adjustedPriceToken1PerToken0 =
+          priceToken1PerToken0 * Math.pow(10, decDiff);
+        let spotPriceOutputInInput: number;
+        if (isToken0In) {
+          spotPriceOutputInInput = 1 / adjustedPriceToken1PerToken0;
+        } else {
+          const adjustedPriceToken0PerToken1 =
+            (1 / priceToken1PerToken0) * Math.pow(10, -decDiff);
+          spotPriceOutputInInput = adjustedPriceToken0PerToken1;
+        }
+        spotNum = spotPriceOutputInInput;
       }
+      spotNativePrice = formatTinyNum(spotNum);
+      if (inputTokenAddress.toLowerCase() === WETH_ADDRESS && ethUsd > 0) {
+        const usdNum = spotNum * ethUsd;
+        spotUsdPrice = formatTinyNum(usdNum, true);
+      } else {
+        spotUsdPrice = "$0.00";
+      }
+
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
       console.log(
@@ -262,17 +342,25 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         )}`
       );
       console.log(
-        `Price: ${nativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`
+        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${outputInfo.symbol} | USD per ${outputInfo.symbol}: ${spotUsdPrice}`
       );
       tradeEvents.push({
         event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
         timestamp,
-        usdPrice,
-        nativePrice,
-        volume: amountOutDecimal,
-        inputVolume: amountInDecimal,
+        usdPrice: spotUsdPrice,
+        nativePrice: `${spotNativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`,
+        volume: formatAmount(
+          finalAmountOut,
+          outputInfo.decimals,
+          outputInfo.symbol
+        ),
+        inputVolume: formatAmount(
+          finalAmountIn,
+          inputInfo.decimals,
+          inputInfo.symbol
+        ),
         mint: outputTokenAddress,
         type:
           outputInfo.symbol === "WETH" || outputInfo.symbol === "USDC"
