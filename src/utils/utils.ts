@@ -1,3 +1,4 @@
+// utils.ts (Full Updated File)
 import { Contract, ethers } from "ethers";
 import {
   provider,
@@ -7,9 +8,10 @@ import {
   WETH_ADDRESS,
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
   V3_SLOT0_ABI,
+  UNISWAP_V4_POOL_MANAGER_ADDRESS,
 } from "../types/constants";
+import * as uniswapV4PoolManagerAbi from "../abi/uniswapV4PoolManager.json";
 import { TokenInfo } from "../types/types";
-import * as uniswapUniversalAbi from "../abi/uniswapUniversalAbi.json";
 import axios from "axios";
 
 export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
@@ -75,4 +77,33 @@ export async function fetchEthPriceUsd(): Promise<number | null> {
     console.error("Error fetching ETH price:", error);
     return null;
   }
+}
+
+export async function getPoolKeyFromPoolManager(
+  poolId: string
+): Promise<{ currency0: string; currency1: string } | null> {
+  // TODO: No public reverse lookup in V4; return null for now
+  console.warn(`V4 PoolManager has no getPool(PoolId); skipping query.`);
+  return null;
+}
+
+export function collectSwapCalls(
+  trace: any,
+  poolManager: string,
+  swapSelector: string
+): any[] {
+  const swaps: any[] = [];
+  function recurse(call: any) {
+    if (
+      call.to?.toLowerCase() === poolManager &&
+      call.input?.startsWith(swapSelector)
+    ) {
+      swaps.push(call);
+    }
+    if (call.calls) {
+      call.calls.forEach(recurse);
+    }
+  }
+  recurse(trace);
+  return swaps;
 }
