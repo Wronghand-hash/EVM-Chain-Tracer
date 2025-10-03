@@ -1,6 +1,7 @@
 import * as dotenv from "dotenv";
-import { analyzeTransaction, analyzeV4Transaction } from "./processor";
+import { analyzeTransaction } from "./uniswapV2&V3";
 import { fetchEthPriceUsd } from "./utils/utils";
+import { analyzeV4Transaction } from "./uniswapV4";
 
 // Load environment variables
 dotenv.config();
@@ -15,7 +16,7 @@ async function main(): Promise<void> {
   const ethPriceUsd = await fetchEthPriceUsd();
   console.log(`ETH price in USD: ${ethPriceUsd}`);
   const txHashes = [
-    "0x3e31133ebd53fa8d3bf8a988a1fa8a076858a1cc3538a93599eead654a72bc48",
+    "0xd73b79bb5830cf7a4a01f13bbbe2ea7fa2834498d1a5138d6b52012013eeae2c",
   ];
   for (const txHash of txHashes) {
     await analyzeTransaction(txHash); // V2/V3
