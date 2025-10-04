@@ -24,6 +24,7 @@ import {
   formatAmount,
   fetchEthPriceUsd,
 } from "./utils/utils";
+// UPDATE: Using the uploaded ABI directly for Universal Router
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
 
@@ -65,6 +66,10 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       const iface = new Interface(uniswapUniversalAbi);
       const parsed = iface.parseTransaction({ data: transaction.data });
       if (parsed?.name === "execute") {
+        // Universal Router's `execute` function has two overloads:
+        // 1. execute(bytes commands, bytes[] inputs)
+        // 2. execute(bytes commands, bytes[] inputs, uint256 deadline)
+        // We handle both by accessing the named arguments `commands` and `inputs`.
         commands = parsed.args.commands;
         inputs = parsed.args.inputs;
         console.log(`Universal Router Commands: ${commands}`);
@@ -217,16 +222,19 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         outputInfo.decimals
       );
 
-      // Helper for human-readable formatting (updated for fixed decimals on tiny values)
+      // Helper for human-readable formatting
       const formatTinyNum = (num: number, isUsd: boolean = false): string => {
         if (num === 0) return isUsd ? "$0.00" : "0";
         if (num >= 0.01) {
-          return isUsd ? `$${num.toFixed(2)}` : num.toFixed(10);
+          // Standard formatting for values > $0.01 or 0.01
+          return isUsd ? `$${num.toFixed(2)}` : num.toFixed(4);
         } else if (num >= 1e-6) {
-          return isUsd ? `$${num.toFixed(6)}` : num.toFixed(6);
+          // Keep 6 significant figures for values between 1e-6 and 0.01
+          return isUsd ? `$${num.toFixed(6)}` : num.toPrecision(6);
         } else {
-          const fixed = parseFloat(num.toFixed(8));
-          return isUsd ? `$${fixed.toString()}` : fixed.toString();
+          // For very tiny numbers, use toPrecision(3) to avoid rounding to zero,
+          // which will use scientific notation if necessary (e.g., 1.40e-7)
+          return isUsd ? `$${num.toPrecision(3)}` : num.toPrecision(6);
         }
       };
 
@@ -263,28 +271,66 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           );
         }
       } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
+        // V3 Price Calculation: P = (1/ (sqrtPriceX96^2 / 2^192)) * 10^(decimals1 - decimals0)
         const sqrtPrice = Number(swap.sqrtPriceX96) / Math.pow(2, 96);
         const priceToken1PerToken0 = sqrtPrice ** 2;
         const decDiff = token1Info.decimals - token0Info.decimals;
         const adjustedPriceToken1PerToken0 =
           priceToken1PerToken0 * Math.pow(10, decDiff);
         let spotPriceOutputInInput: number;
+
         if (isToken0In) {
+          // Price is T1 per T0. If T0 is input, we need T0 per T1, so invert.
           spotPriceOutputInInput = 1 / adjustedPriceToken1PerToken0;
         } else {
+          // Price is T1 per T0. If T1 is input, we need T1 per T0, no invert.
           const adjustedPriceToken0PerToken1 =
             (1 / priceToken1PerToken0) * Math.pow(10, -decDiff);
           spotPriceOutputInInput = adjustedPriceToken0PerToken1;
         }
         spotNum = spotPriceOutputInInput;
       }
-      spotNativePrice = formatTinyNum(spotNum);
-      if (inputTokenAddress.toLowerCase() === WETH_ADDRESS && ethUsd > 0) {
-        const usdNum = spotNum * ethUsd;
-        spotUsdPrice = formatTinyNum(usdNum, true);
-      } else {
-        spotUsdPrice = "$0.00";
+
+      // Calculate effective price as a fallback if spotNum is 0 (due to division by zero)
+      if (spotNum === 0 && finalAmountOut > 0n) {
+        spotNum = parseFloat(amountInDecimal) / parseFloat(amountOutDecimal);
       }
+
+      spotNativePrice = formatTinyNum(spotNum);
+
+      // --- START USD CALCULATION FIX ---
+      let totalUsdVolume = 0;
+      let usdPerOutputToken = 0;
+
+      const isInputWETH = inputTokenAddress.toLowerCase() === WETH_ADDRESS;
+      const isOutputWETH = outputTokenAddress.toLowerCase() === WETH_ADDRESS;
+
+      // 1. Calculate Total USD Volume based on the stable/known token (WETH/ETH)
+      if (ethUsd > 0) {
+        if (isInputWETH) {
+          // Best calculation: Total USD is the value of the WETH input
+          totalUsdVolume = parseFloat(amountInDecimal) * ethUsd;
+        } else if (isOutputWETH) {
+          // Next best calculation: Total USD is the value of the WETH output
+          totalUsdVolume = parseFloat(amountOutDecimal) * ethUsd;
+        }
+        // The CoinGecko fallback logic has been removed as requested.
+      }
+
+      // 2. Calculate USD per Output Token (The REKT price)
+      if (totalUsdVolume > 0 && parseFloat(amountOutDecimal) > 0) {
+        usdPerOutputToken = totalUsdVolume / parseFloat(amountOutDecimal);
+      } else if (isInputWETH && spotNum > 0 && ethUsd > 0) {
+        // Final fallback: Use the native spot price and current ETH/USD rate
+        // USD per Output Token = (WETH per REKT) * (USD per WETH)
+        usdPerOutputToken = spotNum * ethUsd;
+        totalUsdVolume = parseFloat(amountOutDecimal) * usdPerOutputToken;
+      }
+
+      const totalUsdVolumeFormatted = formatTinyNum(totalUsdVolume, true);
+      const usdPerOutputTokenFormatted = formatTinyNum(usdPerOutputToken, true);
+
+      // --- END USD CALCULATION FIX ---
 
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
@@ -302,15 +348,18 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           outputInfo.symbol
         )}`
       );
+
       console.log(
-        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${outputInfo.symbol} | USD per ${outputInfo.symbol}: ${spotUsdPrice}`
+        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${outputInfo.symbol} | USD per ${outputInfo.symbol}: ${usdPerOutputTokenFormatted} | Total Volume: ${totalUsdVolumeFormatted}`
       );
+
       tradeEvents.push({
         event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
         timestamp,
-        usdPrice: spotUsdPrice,
+        // The USD Price field MUST represent the Total USD Volume
+        usdPrice: totalUsdVolumeFormatted,
         nativePrice: `${spotNativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`,
         volume: formatAmount(
           finalAmountOut,
@@ -324,7 +373,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         ),
         mint: outputTokenAddress,
         type:
-          outputInfo.symbol === "WETH" || outputInfo.symbol === "USDC"
+          outputInfo.symbol !== "WETH" && outputInfo.symbol !== "USDC"
             ? "BUY"
             : "SELL",
         pairAddress: swap.pool,
