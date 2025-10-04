@@ -22,11 +22,16 @@ import {
   getTokenInfo,
   getPoolTokens,
   formatAmount,
-  fetchEthPriceUsd,
+  fetchEthPriceUsd, // Assuming a generalized fetchPriceUsd function is available
 } from "./utils/utils";
 // UPDATE: Using the uploaded ABI directly for Universal Router
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
+
+// NOTE: For full USD Volume/Price accuracy for non-ETH assets (WBTC, cbBTC),
+// the `fetchEthPriceUsd` utility needs to be generalized to `fetchAssetPriceUsd`
+// and integrate a multi-asset oracle/price service (e.g., Chainlink, Coingecko API).
+// Currently, only ETH/USD is used for volume calculation.
 
 export async function analyzeTransaction(txHash: string): Promise<void> {
   try {
@@ -45,7 +50,11 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
     const userWallet = transaction.from.toLowerCase();
     const routerAddress = transaction.to?.toLowerCase() || "0x";
+
+    // FETCH PRICE: Fetch ETH price for volume calculation (ETH/USD)
+    // NOTE: This should be expanded to fetch prices for other major tokens (e.g., WBTC)
     const ethUsd = (await fetchEthPriceUsd()) || 0;
+
     console.log(`\n--- Analyzing Transaction: ${txHash} ---`);
     console.log(
       `Status: Success ✅ | From: ${transaction.from} | To: ${transaction.to}`
@@ -268,7 +277,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
 
           // Calculate the spot price of 1 OUTPUT token, expressed in INPUT tokens (P_OUT_in_IN)
           // P = Reserve_INPUT_Adjusted / Reserve_OUTPUT_Adjusted
-          // For WETH(In) -> BABYMANYU(Out), this is WETH per BABYMANYU.
           if (reserveOutAdjusted > 0) {
             spotNum = reserveInAdjusted / reserveOutAdjusted;
           } else {
@@ -280,24 +288,40 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           );
         }
       } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
-        // V3 Price Calculation: P = (1/ (sqrtPriceX96^2 / 2^192)) * 10^(decimals1 - decimals0)
-        const sqrtPrice = Number(swap.sqrtPriceX96) / Math.pow(2, 96);
-        const priceToken1PerToken0 = sqrtPrice ** 2;
-        const decDiff = token1Info.decimals - token0Info.decimals;
-        const adjustedPriceToken1PerToken0 =
-          priceToken1PerToken0 * Math.pow(10, decDiff);
+        // --- V3 Price Calculation Fix ---
+        // Formula to calculate Price_T1_per_T0 (Price of T1 in terms of T0) is:
+        // P_T1_per_T0 = (1 / P_raw) * 10^(dec0 - dec1)
+        const Q96 = Math.pow(2, 96);
+        const sqrtPrice = Number(swap.sqrtPriceX96) / Q96;
+
+        // P_raw = (sqrtPriceX96 / 2^96)^2. This is the raw price of T0 in terms of T1.
+        const priceT0PerT1_raw = sqrtPrice ** 2;
+
+        // Decimal difference: (decimals of T0 - decimals of T1). CRITICAL FIX: The exponent sign is corrected.
+        const decDiff = token0Info.decimals - token1Info.decimals;
+
+        // Calculate the adjusted price of T1 in terms of T0 (P_T1_per_T0)
+        // e.g., for WETH/USDT, this is USDT per WETH (~4500)
+        const priceT1PerT0_adjusted =
+          (1 / priceT0PerT1_raw) * Math.pow(10, decDiff);
+
         let spotPriceOutputInInput: number;
 
-        if (isToken0In) {
-          // Price is T1 per T0. If T0 is input, we need T0 per T1, so invert.
-          spotPriceOutputInInput = 1 / adjustedPriceToken1PerToken0;
+        // Desired price: Price of 1 OUTPUT token, expressed in INPUT tokens (P_OUT_in_IN)
+        if (outputTokenAddress === token1) {
+          // Output is T1. Input is T0. We need P_T1_per_T0 (Price of T1 in T0).
+          // This is the price we just calculated.
+          spotPriceOutputInInput = priceT1PerT0_adjusted;
         } else {
-          // Price is T1 per T0. If T1 is input, we need T1 per T0, no invert.
-          const adjustedPriceToken0PerToken1 =
-            (1 / priceToken1PerToken0) * Math.pow(10, -decDiff);
-          spotPriceOutputInInput = adjustedPriceToken0PerToken1;
+          // outputTokenAddress === token0
+          // Output is T0. Input is T1. We need P_T0_per_T1 (Price of T0 in T1).
+          // P_T0_per_T1 is the reciprocal of P_T1_per_T0.
+          spotPriceOutputInInput = 1 / priceT1PerT0_adjusted;
         }
+
         spotNum = spotPriceOutputInInput;
+
+        // --- End V3 Price Calculation Fix ---
       }
 
       // Calculate effective price as a fallback if spotNum is 0 (due to division by zero or no reserves)
@@ -316,21 +340,30 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
 
       // 1. Calculate Total USD Volume based on the stable/known token (WETH/ETH)
       if (ethUsd > 0) {
+        // Note: For non-ETH assets (like WBTC/cbBTC), we need to fetch their USD price here
+        // For this current setup, we default to using ETH price if one of the pair tokens is WETH
         if (isInputWETH) {
           // Best calculation: Total USD is the value of the WETH input
           totalUsdVolume = parseFloat(amountInDecimal) * ethUsd;
         } else if (isOutputWETH) {
           // Next best calculation: Total USD is the value of the WETH output
           totalUsdVolume = parseFloat(amountOutDecimal) * ethUsd;
+        } else {
+          // TODO: Implement fetching price for non-WETH base assets (e.g. WBTC)
+          console.log(
+            "Warning: USD volume is approximated as WETH/ETH is not in this pair."
+          );
+          // Fallback: If spot price relative to WETH/USDC is known, use that.
+          // For now, leaving at 0 if WETH is not involved and no other oracle is available.
         }
       }
 
-      // 2. Calculate USD per Output Token (The REKT price)
+      // 2. Calculate USD per Output Token
       if (totalUsdVolume > 0 && parseFloat(amountOutDecimal) > 0) {
         usdPerOutputToken = totalUsdVolume / parseFloat(amountOutDecimal);
       } else if (isInputWETH && spotNum > 0 && ethUsd > 0) {
         // Final fallback: Use the native spot price and current ETH/USD rate
-        // USD per Output Token = (WETH per REKT) * (USD per WETH)
+        // USD per Output Token = (WETH per Output Token) * (USD per WETH)
         usdPerOutputToken = spotNum * ethUsd;
         totalUsdVolume = parseFloat(amountOutDecimal) * usdPerOutputToken;
       }
