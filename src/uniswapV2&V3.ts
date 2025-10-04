@@ -238,34 +238,43 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         }
       };
 
-      // Spot price calc with BigInt for V2
-      let spotNativePrice = "0";
-      let spotUsdPrice = "$0.00";
-      let hasReserves = false;
       let spotNum =
         parseFloat(amountInDecimal) / parseFloat(amountOutDecimal) || 0; // Default to effective
+
+      // Spot price calc for V2
       if (swap.protocol === "V2") {
         const reserves = poolReserves[swap.pool];
         if (reserves) {
-          hasReserves = true;
-          let reserveIn: bigint, reserveOut: bigint;
-          if (isToken0In) {
-            reserveIn = reserves.reserve0;
-            reserveOut = reserves.reserve1;
+          let reserveInRaw: bigint, reserveOutRaw: bigint;
+
+          // Determine which reserve corresponds to the input/output token
+          if (inputTokenAddress === token0) {
+            reserveInRaw = reserves.reserve0;
+            reserveOutRaw = reserves.reserve1;
           } else {
-            reserveIn = reserves.reserve1;
-            reserveOut = reserves.reserve0;
+            // inputTokenAddress === token1
+            reserveInRaw = reserves.reserve1;
+            reserveOutRaw = reserves.reserve0;
           }
-          const decDiffSpot = inputInfo.decimals - outputInfo.decimals;
-          let ratioBi: bigint;
-          if (decDiffSpot >= 0) {
-            ratioBi = (reserveIn * 10n ** BigInt(decDiffSpot)) / reserveOut;
+
+          // Convert raw BigInt reserves to adjusted floating-point numbers
+          // This gives the reserves in the tokens' true, human-readable quantities.
+          const reserveInAdjusted = parseFloat(
+            ethers.formatUnits(reserveInRaw, inputInfo.decimals)
+          );
+          const reserveOutAdjusted = parseFloat(
+            ethers.formatUnits(reserveOutRaw, outputInfo.decimals)
+          );
+
+          // Calculate the spot price of 1 OUTPUT token, expressed in INPUT tokens (P_OUT_in_IN)
+          // P = Reserve_INPUT_Adjusted / Reserve_OUTPUT_Adjusted
+          // For WETH(In) -> BABYMANYU(Out), this is WETH per BABYMANYU.
+          if (reserveOutAdjusted > 0) {
+            spotNum = reserveInAdjusted / reserveOutAdjusted;
           } else {
-            ratioBi = reserveIn / (reserveOut * 10n ** BigInt(-decDiffSpot));
+            spotNum = 0;
           }
-          spotNum = Number(ratioBi) || spotNum;
-        }
-        if (!hasReserves) {
+        } else {
           console.log(
             "Debug: No reserves found for V2 pool, using effective price"
           );
@@ -291,14 +300,14 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         spotNum = spotPriceOutputInInput;
       }
 
-      // Calculate effective price as a fallback if spotNum is 0 (due to division by zero)
-      if (spotNum === 0 && finalAmountOut > 0n) {
+      // Calculate effective price as a fallback if spotNum is 0 (due to division by zero or no reserves)
+      if (spotNum === 0 && parseFloat(amountOutDecimal) > 0) {
         spotNum = parseFloat(amountInDecimal) / parseFloat(amountOutDecimal);
       }
 
-      spotNativePrice = formatTinyNum(spotNum);
+      let spotNativePrice = formatTinyNum(spotNum);
 
-      // --- START USD CALCULATION FIX ---
+      // --- USD CALCULATION ---
       let totalUsdVolume = 0;
       let usdPerOutputToken = 0;
 
@@ -314,7 +323,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           // Next best calculation: Total USD is the value of the WETH output
           totalUsdVolume = parseFloat(amountOutDecimal) * ethUsd;
         }
-        // The CoinGecko fallback logic has been removed as requested.
       }
 
       // 2. Calculate USD per Output Token (The REKT price)
@@ -330,7 +338,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       const totalUsdVolumeFormatted = formatTinyNum(totalUsdVolume, true);
       const usdPerOutputTokenFormatted = formatTinyNum(usdPerOutputToken, true);
 
-      // --- END USD CALCULATION FIX ---
+      // --- END USD CALCULATION ---
 
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
