@@ -331,47 +331,53 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
 
       let spotNativePrice = formatTinyNum(spotNum);
 
-      // --- USD CALCULATION ---
+      // --- REVISED USD CALCULATION ---
       let totalUsdVolume = 0;
       let usdPerOutputToken = 0;
 
       const isInputWETH = inputTokenAddress.toLowerCase() === WETH_ADDRESS;
       const isOutputWETH = outputTokenAddress.toLowerCase() === WETH_ADDRESS;
+      const amountInNum = parseFloat(amountInDecimal);
+      const amountOutNum = parseFloat(amountOutDecimal);
 
-      // 1. Calculate Total USD Volume based on the stable/known token (WETH/ETH)
       if (ethUsd > 0) {
-        // Note: For non-ETH assets (like WBTC/cbBTC), we need to fetch their USD price here
-        // For this current setup, we default to using ETH price if one of the pair tokens is WETH
         if (isInputWETH) {
-          // Best calculation: Total USD is the value of the WETH input
-          totalUsdVolume = parseFloat(amountInDecimal) * ethUsd;
+          // Case 1: Input is WETH, Output is Token.
+          // spotNum = WETH / Output_Token (Price of 1 Output Token in WETH).
+          // USD/Output_Token = (WETH/Output_Token) * (USD/WETH)
+          if (spotNum > 0) {
+            usdPerOutputToken = spotNum * ethUsd;
+          }
+
+          // Total Volume is based on the WETH input side (most accurate leg)
+          totalUsdVolume = amountInNum * ethUsd;
         } else if (isOutputWETH) {
-          // Next best calculation: Total USD is the value of the WETH output
-          totalUsdVolume = parseFloat(amountOutDecimal) * ethUsd;
+          // Case 2: Output is WETH, Input is Token.
+          // USD/Output_Token (WETH) is simply ethUsd.
+          usdPerOutputToken = ethUsd;
+
+          // Total Volume is based on the WETH output side (most accurate leg)
+          totalUsdVolume = amountOutNum * ethUsd;
         } else {
-          // TODO: Implement fetching price for non-WETH base assets (e.g. WBTC)
+          // Case 3: Neither token is WETH/ETH. Cannot calculate USD price with current oracle.
           console.log(
             "Warning: USD volume is approximated as WETH/ETH is not in this pair."
           );
-          // Fallback: If spot price relative to WETH/USDC is known, use that.
-          // For now, leaving at 0 if WETH is not involved and no other oracle is available.
+        }
+
+        // Secondary Fallback for Price: If total volume was calculated, but the per-token USD price was 0
+        // (e.g., due to spotNum being 0), use the effective trade price (Volume/Amount) as the price.
+        if (
+          usdPerOutputToken === 0 &&
+          totalUsdVolume > 0 &&
+          amountOutNum > 0 &&
+          (isInputWETH || isOutputWETH)
+        ) {
+          usdPerOutputToken = totalUsdVolume / amountOutNum;
         }
       }
 
-      // 2. Calculate USD per Output Token
-      if (totalUsdVolume > 0 && parseFloat(amountOutDecimal) > 0) {
-        usdPerOutputToken = totalUsdVolume / parseFloat(amountOutDecimal);
-      } else if (isInputWETH && spotNum > 0 && ethUsd > 0) {
-        // Final fallback: Use the native spot price and current ETH/USD rate
-        // USD per Output Token = (WETH per Output Token) * (USD per WETH)
-        usdPerOutputToken = spotNum * ethUsd;
-        totalUsdVolume = parseFloat(amountOutDecimal) * usdPerOutputToken;
-      }
-
-      const totalUsdVolumeFormatted = formatTinyNum(totalUsdVolume, true);
-      const usdPerOutputTokenFormatted = formatTinyNum(usdPerOutputToken, true);
-
-      // --- END USD CALCULATION ---
+      // --- END REVISED USD CALCULATION ---
 
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
@@ -391,7 +397,11 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       );
 
       console.log(
-        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${outputInfo.symbol} | USD per ${outputInfo.symbol}: ${usdPerOutputTokenFormatted} | Total Volume: ${totalUsdVolumeFormatted}`
+        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${
+          outputInfo.symbol
+        } | USD per ${outputInfo.symbol}: ${usdPerOutputToken.toFixed(
+          6
+        )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
       );
 
       tradeEvents.push({
@@ -400,18 +410,10 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         txHash,
         timestamp,
         // The USD Price field MUST represent the Total USD Volume
-        usdPrice: totalUsdVolumeFormatted,
+        usdPrice: usdPerOutputToken.toFixed(6),
         nativePrice: `${spotNativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`,
-        volume: formatAmount(
-          finalAmountOut,
-          outputInfo.decimals,
-          outputInfo.symbol
-        ),
-        inputVolume: formatAmount(
-          finalAmountIn,
-          inputInfo.decimals,
-          inputInfo.symbol
-        ),
+        volume: totalUsdVolume.toFixed(6),
+        inputVolume: finalAmountIn.toString(),
         mint: outputTokenAddress,
         type:
           outputInfo.symbol !== "WETH" && outputInfo.symbol !== "USDC"
