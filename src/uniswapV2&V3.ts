@@ -88,6 +88,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const swaps: SwapEvent[] = [];
     const tokenAddresses = new Set<string>();
     const poolAddresses = new Set<string>();
+    const v4PoolIds = new Set<string>();
     const poolReserves: {
       [pool: string]: { reserve0: bigint; reserve1: bigint };
     } = {};
@@ -137,6 +138,38 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
             `Failed to parse Swap event for log: ${log.transactionHash}`
           );
         }
+      } else if (topic0 === V4_SWAP_EVENT_TOPIC?.toLowerCase()) {
+        try {
+          const parsed = v4SwapIface.parseLog(log);
+          if (parsed && parsed.args) {
+            const v4Iface = new Interface(uniswapV4PoolManagerAbi);
+            const poolKey = parsed.args.key;
+            const poolKeyBytes = v4Iface.encodeStruct("PoolKey", [poolKey]);
+            const poolId = ethers.keccak256(poolKeyBytes);
+            const protocol = "V4";
+            const swapEvent: SwapEvent = {
+              pool: poolId,
+              sender: parsed.args.sender.toLowerCase(),
+              recipient: parsed.args.recipient.toLowerCase(),
+              amount0: parsed.args.amount0,
+              amount1: parsed.args.amount1,
+              protocol,
+              tick: Number(parsed.args.tick),
+              sqrtPriceX96: 0n, // Not emitted in event
+              liquidity: 0n,
+            };
+            swaps.push(swapEvent);
+            const token0 = poolKey.currency0.toLowerCase();
+            const token1 = poolKey.currency1.toLowerCase();
+            poolTokens[poolId] = { token0, token1 };
+            poolAddresses.add(poolId);
+            v4PoolIds.add(poolId);
+            tokenAddresses.add(token0);
+            tokenAddresses.add(token1);
+          }
+        } catch (e) {
+          console.warn(`Failed to parse V4 Swap event: ${e}`);
+        }
       } else if (topic0 === TRANSFER_TOPIC?.toLowerCase()) {
         try {
           const parsed = transferIface.parseLog(log);
@@ -174,9 +207,11 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       ...Array.from(tokenAddresses).map((t) =>
         getTokenInfo(t).then((info) => (tokenInfos[t] = info))
       ),
-      ...Array.from(poolAddresses).map((p) =>
-        getPoolTokens(p).then((tokens) => (poolTokens[p] = tokens))
-      ),
+      ...Array.from(poolAddresses)
+        .filter((p) => !v4PoolIds.has(p))
+        .map((p) =>
+          getPoolTokens(p).then((tokens) => (poolTokens[p] = tokens))
+        ),
     ]);
     const tradeEvents: TradeEvent[] = [];
     for (const [index, swap] of swaps.entries()) {
@@ -203,7 +238,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       let outputInfo: TokenInfo;
       let swapAmountIn: bigint;
       let swapAmountOut: bigint;
-      if (swap.protocol === "V3") {
+      if (swap.protocol === "V3" || swap.protocol === "V4") {
         isToken0In = swap.amount0 > 0n;
         inputTokenAddress = isToken0In ? token0 : token1;
         outputTokenAddress = isToken0In ? token1 : token0;
@@ -266,20 +301,11 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
             reserveOutRaw = reserves.reserve0;
           }
 
-          // Convert raw BigInt reserves to adjusted floating-point numbers
-          // This gives the reserves in the tokens' true, human-readable quantities.
-          const reserveInAdjusted = parseFloat(
-            ethers.formatUnits(reserveInRaw, inputInfo.decimals)
-          );
-          const reserveOutAdjusted = parseFloat(
-            ethers.formatUnits(reserveOutRaw, outputInfo.decimals)
-          );
-
-          // Calculate the spot price of 1 OUTPUT token, expressed in INPUT tokens (P_OUT_in_IN)
-          // P = Reserve_INPUT_Adjusted / Reserve_OUTPUT_Adjusted
-          if (reserveOutAdjusted > 0) {
-            spotNum = reserveInAdjusted / reserveOutAdjusted;
-          } else {
+          // Calculate spotNum = (reserveInRaw / reserveOutRaw) * 10^(decOut - decIn)
+          const decDiff = outputInfo.decimals - inputInfo.decimals;
+          const adjustment = Math.pow(10, decDiff);
+          spotNum = (Number(reserveInRaw) / Number(reserveOutRaw)) * adjustment;
+          if (isNaN(spotNum) || !isFinite(spotNum)) {
             spotNum = 0;
           }
         } else {
@@ -289,39 +315,38 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         }
       } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
         // --- V3 Price Calculation Fix ---
-        // Formula to calculate Price_T1_per_T0 (Price of T1 in terms of T0) is:
-        // P_T1_per_T0 = (1 / P_raw) * 10^(dec0 - dec1)
-        const Q96 = Math.pow(2, 96);
+        // rawPrice = (sqrtPriceX96 / 2^96)^2 = token1 per token0 (raw, no decimals)
+        const Q96 = 2 ** 96;
         const sqrtPrice = Number(swap.sqrtPriceX96) / Q96;
+        const rawPrice_token1_per_token0 = sqrtPrice ** 2;
 
-        // P_raw = (sqrtPriceX96 / 2^96)^2. This is the raw price of T0 in terms of T1.
-        const priceT0PerT1_raw = sqrtPrice ** 2;
+        // Adjust for decimals: token1 per token0 adjusted
+        const decDiff = token1Info.decimals - token0Info.decimals;
+        const poolPrice_adjusted =
+          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
 
-        // Decimal difference: (decimals of T0 - decimals of T1). CRITICAL FIX: The exponent sign is corrected.
-        const decDiff = token0Info.decimals - token1Info.decimals;
-
-        // Calculate the adjusted price of T1 in terms of T0 (P_T1_per_T0)
-        // e.g., for WETH/USDT, this is USDT per WETH (~4500)
-        const priceT1PerT0_adjusted =
-          (1 / priceT0PerT1_raw) * Math.pow(10, decDiff);
-
-        let spotPriceOutputInInput: number;
-
-        // Desired price: Price of 1 OUTPUT token, expressed in INPUT tokens (P_OUT_in_IN)
-        if (outputTokenAddress === token1) {
-          // Output is T1. Input is T0. We need P_T1_per_T0 (Price of T1 in T0).
-          // This is the price we just calculated.
-          spotPriceOutputInInput = priceT1PerT0_adjusted;
-        } else {
-          // outputTokenAddress === token0
-          // Output is T0. Input is T1. We need P_T0_per_T1 (Price of T0 in T1).
-          // P_T0_per_T1 is the reciprocal of P_T1_per_T0.
-          spotPriceOutputInInput = 1 / priceT1PerT0_adjusted;
+        // spotNum = input per output
+        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
+        if (isNaN(spotNum) || !isFinite(spotNum)) {
+          spotNum = 0;
         }
-
-        spotNum = spotPriceOutputInInput;
-
         // --- End V3 Price Calculation Fix ---
+      } else if (swap.protocol === "V4" && typeof swap.tick === "number") {
+        // V4 Price Calculation from tick
+        const log1p = Math.log(1.0001);
+        const exponent = swap.tick * log1p;
+        const rawPrice_token1_per_token0 = Math.exp(exponent);
+
+        // Adjust for decimals: token1 per token0 adjusted
+        const decDiff = token1Info.decimals - token0Info.decimals;
+        const poolPrice_adjusted =
+          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
+
+        // spotNum = input per output
+        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
+        if (isNaN(spotNum) || !isFinite(spotNum)) {
+          spotNum = 0;
+        }
       }
 
       // Calculate effective price as a fallback if spotNum is 0 (due to division by zero or no reserves)
@@ -416,7 +441,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         inputVolume: finalAmountIn.toString(),
         mint: outputTokenAddress,
         type:
-          outputInfo.symbol !== "WETH" && outputInfo.symbol !== "USDC"
+          outputInfo.symbol !== "WETH" &&
+          outputInfo.symbol !== "USDC" &&
+          outputInfo.symbol !== "USDT"
             ? "BUY"
             : "SELL",
         pairAddress: swap.pool,
