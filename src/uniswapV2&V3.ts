@@ -325,39 +325,54 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       }
       // --- End Price Calculation ---
 
-      const spotNativePrice = formatTinyNum(spotNum);
-
-      // --- USD CALCULATION ---
+      // --- USD CALCULATION (Standardized to base token pricing) ---
       let totalUsdVolume = 0;
-      let usdPerOutputToken = 0;
+      let usdPerBaseToken = 0;
+      let spotNumWethPerBase = 0;
+      let baseSymbol = "";
+      let baseTokenAddress = "";
+      let baseInfo: TokenInfo = UNKNOWN_TOKEN_INFO;
+      let isBuy = false;
+      let amountBaseDecimal = 0;
 
       const isInputWETH = inputTokenAddress.toLowerCase() === WETH_ADDRESS;
       const isOutputWETH = outputTokenAddress.toLowerCase() === WETH_ADDRESS;
+      const isWethInvolved = isInputWETH || isOutputWETH;
 
-      if (ethUsd > 0) {
+      if (isWethInvolved && ethUsd > 0 && spotNum > 0) {
         if (isInputWETH) {
-          // Input is WETH, price output token in USD
-          usdPerOutputToken = spotNum * ethUsd;
-          totalUsdVolume = amountInDecimal * ethUsd;
-        } else if (isOutputWETH) {
-          // Output is WETH, price WETH in USD (ethUsd)
-          usdPerOutputToken = ethUsd;
-          totalUsdVolume = amountOutDecimal * ethUsd;
+          // BUY: WETH in, base out
+          baseTokenAddress = outputTokenAddress;
+          baseInfo = outputInfo;
+          amountBaseDecimal = amountOutDecimal;
+          isBuy = true;
+          spotNumWethPerBase = spotNum; // Already WETH per base
         } else {
-          // Neither is WETH. Total volume approximation warning logged.
-          console.log(
-            "Warning: USD volume is approximated as WETH/ETH is not in this pair."
-          );
+          // SELL: base in, WETH out
+          baseTokenAddress = inputTokenAddress;
+          baseInfo = inputInfo;
+          amountBaseDecimal = amountInDecimal;
+          isBuy = false;
+          spotNumWethPerBase = 1 / spotNum; // Invert base per WETH to WETH per base
         }
+        usdPerBaseToken = spotNumWethPerBase * ethUsd;
+        totalUsdVolume = amountBaseDecimal * usdPerBaseToken;
+        baseSymbol = baseInfo.symbol;
+      } else if (!isWethInvolved) {
+        // Neither is WETH. Total volume approximation warning logged.
+        console.log(
+          "Warning: USD volume is approximated as WETH/ETH is not in this pair."
+        );
+        // Fallback: use effective price if possible, but for now set to 0
+      }
 
-        // Secondary Fallback for Price
-        if (
-          usdPerOutputToken === 0 &&
-          totalUsdVolume > 0 &&
-          amountOutDecimal > 0
-        ) {
-          usdPerOutputToken = totalUsdVolume / amountOutDecimal;
-        }
+      // Secondary Fallback for Price (if needed, e.g., spotNum invalid)
+      if (
+        usdPerBaseToken === 0 &&
+        totalUsdVolume > 0 &&
+        amountBaseDecimal > 0
+      ) {
+        usdPerBaseToken = totalUsdVolume / amountBaseDecimal;
       }
       // --- End USD CALCULATION ---
       console.log(
@@ -385,36 +400,59 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           outputInfo.symbol
         )}`
       );
-      console.log(
-        `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${
-          outputInfo.symbol
-        } | USD per ${outputInfo.symbol}: ${usdPerOutputToken.toFixed(
-          6
-        )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
-      );
+      if (isWethInvolved) {
+        console.log(
+          `Spot Price: ${formatTinyNum(
+            spotNumWethPerBase
+          )} WETH per ${baseSymbol} | USD per ${baseSymbol}: ${usdPerBaseToken.toFixed(
+            6
+          )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
+        );
+      } else {
+        console.log(
+          `Spot Price: ${formatTinyNum(spotNum)} ${inputInfo.symbol} per ${
+            outputInfo.symbol
+          } | USD per ${outputInfo.symbol}: ${usdPerBaseToken.toFixed(
+            6
+          )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
+        );
+      }
       // Construct TradeEvent
       tradeEvents.push({
         event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
         timestamp,
-        usdPrice: usdPerOutputToken.toFixed(6),
-        nativePrice: `${spotNativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`,
+        usdPrice: usdPerBaseToken.toFixed(6),
+        nativePrice: isWethInvolved
+          ? `${formatTinyNum(spotNumWethPerBase)} WETH/${baseSymbol}`
+          : `${formatTinyNum(spotNum)} ${inputInfo.symbol}/${
+              outputInfo.symbol
+            }`,
         volume: totalUsdVolume.toFixed(6),
         inputVolume: finalAmountIn.toString(),
-        mint: outputTokenAddress,
-        type:
-          outputInfo.symbol !== "WETH" &&
-          outputInfo.symbol !== "USDC" &&
-          outputInfo.symbol !== "USDT"
+        mint: isWethInvolved ? baseTokenAddress : outputTokenAddress,
+        type: isWethInvolved
+          ? isBuy
             ? "BUY"
-            : "SELL", // Logic for BUY/SELL remains the same
+            : "SELL"
+          : outputInfo.symbol !== "WETH" &&
+            outputInfo.symbol !== "USDC" &&
+            outputInfo.symbol !== "USDT"
+          ? "BUY"
+          : "SELL",
         pairAddress: swap.pool,
         programId: routerAddress,
-        quoteToken: inputTokenAddress,
-        baseDecimals: outputInfo.decimals,
-        quoteDecimals: inputInfo.decimals,
-        tradeType: `${inputInfo.symbol} -> ${outputInfo.symbol}`,
+        quoteToken: isWethInvolved
+          ? WETH_ADDRESS.toLowerCase()
+          : inputTokenAddress,
+        baseDecimals: isWethInvolved ? baseInfo.decimals : outputInfo.decimals,
+        quoteDecimals: isWethInvolved ? 18 : inputInfo.decimals,
+        tradeType: isWethInvolved
+          ? isBuy
+            ? `WETH -> ${baseSymbol}`
+            : `${baseSymbol} -> WETH`
+          : `${inputInfo.symbol} -> ${outputInfo.symbol}`,
         walletAddress: userWallet,
         protocol: swap.protocol,
       });
