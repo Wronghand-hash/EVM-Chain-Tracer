@@ -58,10 +58,12 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         transaction.value
       )} ETH`
     );
+    const gasPrice = receipt.gasPrice;
     console.log(
-      `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
+      `Fee: ${ethers.formatEther(receipt.gasUsed * gasPrice)} ETH | Gas Used: ${
+        receipt.gasUsed
+      } | Gas Price: ${ethers.formatUnits(gasPrice, "gwei")} Gwei`
     );
-
     // --- Universal Router Parsing (Simplified) ---
     if (routerAddress === UNISWAP_UNIVERSAL_ROUTER_ADDRESS) {
       const iface = new Interface(uniswapUniversalAbi);
@@ -300,7 +302,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         const sqrtPrice = Number(swap.sqrtPriceX96) / Q96;
         const rawPrice_token1_per_token0 = sqrtPrice ** 2;
 
-        const decDiff = token1Info.decimals - token0Info.decimals;
+        const decDiff = token0Info.decimals - token1Info.decimals;
         const poolPrice_adjusted =
           rawPrice_token1_per_token0 * Math.pow(10, decDiff);
 
@@ -313,7 +315,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         const exponent = swap.tick * log1p;
         const rawPrice_token1_per_token0 = Math.exp(exponent);
 
-        const decDiff = token1Info.decimals - token0Info.decimals;
+        const decDiff = token0Info.decimals - token1Info.decimals;
         const poolPrice_adjusted =
           rawPrice_token1_per_token0 * Math.pow(10, decDiff);
 
@@ -358,7 +360,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         }
       }
       // --- End USD CALCULATION ---
-
       console.log(
         `\n===== Swap ${index + 1} (${swap.protocol}, Pool: ${swap.pool}) =====`
       );
@@ -391,7 +392,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           6
         )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
       );
-
       // Construct TradeEvent
       tradeEvents.push({
         event: `Swap${index + 1}`,
@@ -420,7 +420,27 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       });
     }
     // --- End Swap Analysis Loop ---
-
+    // Net ETH Inflow Calculation
+    const preBalance = await provider.getBalance(
+      userWallet,
+      BigInt(receipt.blockNumber - 1)
+    );
+    const postBalance = await provider.getBalance(
+      userWallet,
+      BigInt(receipt.blockNumber)
+    );
+    const balanceChange = postBalance - preBalance;
+    const gasCost = receipt.gasUsed * gasPrice;
+    const netEthInflow = balanceChange + gasCost;
+    if (netEthInflow > 0n) {
+      console.log(
+        `Net ETH Inflow (after solver/relay fees): ${ethers.formatEther(
+          netEthInflow
+        )} ETH (~$${(Number(ethers.formatEther(netEthInflow)) * ethUsd).toFixed(
+          2
+        )})`
+      );
+    }
     // --- Final Output ---
     if (tradeEvents.length > 0) {
       tradeEvents.forEach((event, index) => {
