@@ -2,6 +2,7 @@ export interface TokenInfo {
   decimals: number;
   symbol: string;
   name: string;
+  totalSupply?: any;
 }
 
 export interface Transfer {
