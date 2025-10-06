@@ -423,13 +423,13 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         status: "Success ✅",
         txHash,
         timestamp,
-        usdPrice: usdPerBaseToken.toFixed(6),
+        usdPrice: usdPerBaseToken.toFixed(10),
         nativePrice: isWethInvolved
           ? `${formatTinyNum(spotNumWethPerBase)} WETH/${baseSymbol}`
           : `${formatTinyNum(spotNum)} ${inputInfo.symbol}/${
               outputInfo.symbol
             }`,
-        volume: totalUsdVolume.toFixed(6),
+        volume: totalUsdVolume.toFixed(10),
         inputVolume: finalAmountIn.toString(),
         mint: isWethInvolved ? baseTokenAddress : outputTokenAddress,
         type: isWethInvolved
