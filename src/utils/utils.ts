@@ -1,4 +1,3 @@
-// utils.ts (Full Updated File)
 import { Contract, ethers } from "ethers";
 import {
   provider,

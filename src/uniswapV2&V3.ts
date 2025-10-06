@@ -22,16 +22,12 @@ import {
   getTokenInfo,
   getPoolTokens,
   formatAmount,
-  fetchEthPriceUsd, // Assuming a generalized fetchPriceUsd function is available
+  fetchEthPriceUsd,
 } from "./utils/utils";
-// UPDATE: Using the uploaded ABI directly for Universal Router
 import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
 
-// NOTE: For full USD Volume/Price accuracy for non-ETH assets (WBTC, cbBTC),
-// the `fetchEthPriceUsd` utility needs to be generalized to `fetchAssetPriceUsd`
-// and integrate a multi-asset oracle/price service (e.g., Chainlink, Coingecko API).
-// Currently, only ETH/USD is used for volume calculation.
+// TODO: For full USD Volume/Price accuracy for non-ETH assets (WBTC, cbBTC) Stable token selection required
 
 export async function analyzeTransaction(txHash: string): Promise<void> {
   try {
@@ -51,11 +47,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const userWallet = transaction.from.toLowerCase();
     const routerAddress = transaction.to?.toLowerCase() || "0x";
 
-    // FETCH PRICE: Fetch ETH price for volume calculation (ETH/USD)
-    // NOTE: This should be expanded to fetch prices for other major tokens (e.g., WBTC)
     const ethUsd = (await fetchEthPriceUsd()) || 0;
 
-    console.log(`\n--- Analyzing Transaction: ${txHash} ---`);
+    console.log(`\n--- checking V2/V3/V4 Transaction: ${txHash} ---`);
     console.log(
       `Status: Success ✅ | From: ${transaction.from} | To: ${transaction.to}`
     );
@@ -67,36 +61,41 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     console.log(
       `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
     );
-    const isUniversalRouter =
-      routerAddress === UNISWAP_UNIVERSAL_ROUTER_ADDRESS;
-    let commands: string = "";
-    let inputs: string[] = [];
-    if (isUniversalRouter) {
+
+    // --- Universal Router Parsing (Simplified) ---
+    if (routerAddress === UNISWAP_UNIVERSAL_ROUTER_ADDRESS) {
       const iface = new Interface(uniswapUniversalAbi);
       const parsed = iface.parseTransaction({ data: transaction.data });
       if (parsed?.name === "execute") {
-        // Universal Router's `execute` function has two overloads:
-        // 1. execute(bytes commands, bytes[] inputs)
-        // 2. execute(bytes commands, bytes[] inputs, uint256 deadline)
-        // We handle both by accessing the named arguments `commands` and `inputs`.
-        commands = parsed.args.commands;
-        inputs = parsed.args.inputs;
+        const commands: string = parsed.args.commands;
+        const inputs: string[] = parsed.args.inputs;
         console.log(`Universal Router Commands: ${commands}`);
+        // `inputs` are available but not currently used in this script
       }
     }
-    const transfers: Transfer[] = [];
+    // --- End Universal Router Parsing ---
+
+    // Initialize all data structures
     const swaps: SwapEvent[] = [];
+    const transfers: Transfer[] = []; // Transfers are collected but not used in the final trade logic
     const tokenAddresses = new Set<string>();
     const poolAddresses = new Set<string>();
     const v4PoolIds = new Set<string>();
     const poolReserves: {
       [pool: string]: { reserve0: bigint; reserve1: bigint };
     } = {};
+    const poolTokens: {
+      [pool: string]: { token0: string; token1: string };
+    } = {};
+    const v4Iface = new Interface(uniswapV4PoolManagerAbi);
+
+    // --- Log Parsing Loop ---
     for (const log of receipt.logs) {
       if (!log.topics[0]) continue;
       const topic0 = log.topics[0].toLowerCase();
       const logAddrLower = log.address.toLowerCase();
       tokenAddresses.add(logAddrLower);
+
       if (
         topic0 === V2_SWAP_EVENT_TOPIC?.toLowerCase() ||
         topic0 === V3_SWAP_EVENT_TOPIC?.toLowerCase()
@@ -134,34 +133,33 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
             poolAddresses.add(logAddrLower);
           }
         } catch (e) {
-          console.warn(
-            `Failed to parse Swap event for log: ${log.transactionHash}`
-          );
+          console.warn(`Failed to parse Swap event: ${log.transactionHash}`);
         }
       } else if (topic0 === V4_SWAP_EVENT_TOPIC?.toLowerCase()) {
         try {
           const parsed = v4SwapIface.parseLog(log);
           if (parsed && parsed.args) {
-            const v4Iface = new Interface(uniswapV4PoolManagerAbi);
             const poolKey = parsed.args.key;
+            // Keccak256 hash of the RLP-encoded PoolKey struct (as bytes) is the pool ID
             const poolKeyBytes = v4Iface.encodeStruct("PoolKey", [poolKey]);
             const poolId = ethers.keccak256(poolKeyBytes);
-            const protocol = "V4";
+
             const swapEvent: SwapEvent = {
               pool: poolId,
               sender: parsed.args.sender.toLowerCase(),
               recipient: parsed.args.recipient.toLowerCase(),
               amount0: parsed.args.amount0,
               amount1: parsed.args.amount1,
-              protocol,
+              protocol: "V4",
               tick: Number(parsed.args.tick),
-              sqrtPriceX96: 0n, // Not emitted in event
+              sqrtPriceX96: 0n,
               liquidity: 0n,
             };
             swaps.push(swapEvent);
+
             const token0 = poolKey.currency0.toLowerCase();
             const token1 = poolKey.currency1.toLowerCase();
-            poolTokens[poolId] = { token0, token1 };
+            poolTokens[poolId] = { token0, token1 }; // Save V4 token info here
             poolAddresses.add(poolId);
             v4PoolIds.add(poolId);
             tokenAddresses.add(token0);
@@ -181,7 +179,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
               value: parsed.args.value,
             });
           }
-        } catch {}
+        } catch {} // Silent fail for non-ERC20/unknown transfers
       } else if (topic0 === V2_SYNC_EVENT_TOPIC?.toLowerCase()) {
         try {
           const parsed = v2SyncIface.parseLog(log);
@@ -200,21 +198,167 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         }
       }
     }
+    // --- End Log Parsing Loop ---
+
+    // --- Concurrent Data Fetching ---
     const tokenInfos: { [address: string]: TokenInfo } = {};
-    const poolTokens: { [pool: string]: { token0: string; token1: string } } =
-      {};
-    await Promise.all([
-      ...Array.from(tokenAddresses).map((t) =>
-        getTokenInfo(t).then((info) => (tokenInfos[t] = info))
-      ),
-      ...Array.from(poolAddresses)
-        .filter((p) => !v4PoolIds.has(p))
-        .map((p) =>
+    const fetchPromises: Promise<any>[] = [];
+
+    // 1. Fetch token info for all token addresses found
+    Array.from(tokenAddresses).forEach((t) =>
+      fetchPromises.push(getTokenInfo(t).then((info) => (tokenInfos[t] = info)))
+    );
+
+    // 2. Fetch token pair for non-V4 pools (V4 tokens were determined during log parsing)
+    Array.from(poolAddresses)
+      .filter((p) => !v4PoolIds.has(p))
+      .forEach((p) =>
+        fetchPromises.push(
           getPoolTokens(p).then((tokens) => (poolTokens[p] = tokens))
-        ),
-    ]);
+        )
+      );
+
+    await Promise.all(fetchPromises);
+    // --- End Concurrent Data Fetching ---
+
     const tradeEvents: TradeEvent[] = [];
+
+    // Helper for human-readable formatting (moved outside the loop to be defined once)
+    const formatTinyNum = (num: number, isUsd: boolean = false): string => {
+      if (num === 0) return isUsd ? "$0.00" : "0";
+      if (num >= 0.01) {
+        return isUsd ? `$${num.toFixed(2)}` : num.toFixed(4);
+      } else if (num >= 1e-6) {
+        return isUsd ? `$${num.toFixed(6)}` : num.toPrecision(6);
+      } else {
+        return isUsd ? `$${num.toPrecision(3)}` : num.toPrecision(6);
+      }
+    };
+
+    // --- Swap Analysis Loop ---
     for (const [index, swap] of swaps.entries()) {
+      const poolTokensInfo = poolTokens[swap.pool];
+      if (!poolTokensInfo) continue;
+
+      const { token0: token0Addr, token1: token1Addr } = poolTokensInfo;
+      const token0Info = tokenInfos[token0Addr] || UNKNOWN_TOKEN_INFO;
+      const token1Info = tokenInfos[token1Addr] || UNKNOWN_TOKEN_INFO;
+
+      let isToken0In: boolean;
+
+      if (swap.protocol === "V3" || swap.protocol === "V4") {
+        isToken0In = swap.amount0 > 0n;
+      } else {
+        // V2 (amount0In > 0)
+        isToken0In = swap.amount0 > 0n;
+      }
+
+      // Consolidate token assignment logic
+      const inputTokenAddress = isToken0In ? token0Addr : token1Addr;
+      const outputTokenAddress = isToken0In ? token1Addr : token0Addr;
+      const inputInfo = isToken0In ? token0Info : token1Info;
+      const outputInfo = isToken0In ? token1Info : token0Info;
+
+      const swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
+      const swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
+
+      const finalAmountIn = swapAmountIn;
+      const finalAmountOut = swapAmountOut;
+
+      const amountInDecimal = parseFloat(
+        ethers.formatUnits(finalAmountIn, inputInfo.decimals)
+      );
+      const amountOutDecimal = parseFloat(
+        ethers.formatUnits(finalAmountOut, outputInfo.decimals)
+      );
+
+      // --- Price Calculation ---
+      let spotNum =
+        amountOutDecimal > 0 ? amountInDecimal / amountOutDecimal : 0;
+
+      if (swap.protocol === "V2") {
+        const reserves = poolReserves[swap.pool];
+        if (reserves) {
+          const reserveInRaw = isToken0In
+            ? reserves.reserve0
+            : reserves.reserve1;
+          const reserveOutRaw = isToken0In
+            ? reserves.reserve1
+            : reserves.reserve0;
+
+          if (reserveOutRaw > 0n) {
+            const decDiff = outputInfo.decimals - inputInfo.decimals;
+            const adjustment = Math.pow(10, decDiff);
+            spotNum =
+              (Number(reserveInRaw) / Number(reserveOutRaw)) * adjustment;
+            if (isNaN(spotNum) || !isFinite(spotNum)) spotNum = 0;
+          }
+        }
+      } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
+        // V3 Price Calculation
+        const Q96 = 2 ** 96;
+        const sqrtPrice = Number(swap.sqrtPriceX96) / Q96;
+        const rawPrice_token1_per_token0 = sqrtPrice ** 2;
+
+        const decDiff = token1Info.decimals - token0Info.decimals;
+        const poolPrice_adjusted =
+          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
+
+        // spotNum = input per output
+        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
+        if (isNaN(spotNum) || !isFinite(spotNum)) spotNum = 0;
+      } else if (swap.protocol === "V4" && typeof swap.tick === "number") {
+        // V4 Price Calculation from tick
+        const log1p = Math.log(1.0001);
+        const exponent = swap.tick * log1p;
+        const rawPrice_token1_per_token0 = Math.exp(exponent);
+
+        const decDiff = token1Info.decimals - token0Info.decimals;
+        const poolPrice_adjusted =
+          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
+
+        // spotNum = input per output
+        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
+        if (isNaN(spotNum) || !isFinite(spotNum)) spotNum = 0;
+      }
+      // --- End Price Calculation ---
+
+      const spotNativePrice = formatTinyNum(spotNum);
+
+      // --- USD CALCULATION ---
+      let totalUsdVolume = 0;
+      let usdPerOutputToken = 0;
+
+      const isInputWETH = inputTokenAddress.toLowerCase() === WETH_ADDRESS;
+      const isOutputWETH = outputTokenAddress.toLowerCase() === WETH_ADDRESS;
+
+      if (ethUsd > 0) {
+        if (isInputWETH) {
+          // Input is WETH, price output token in USD
+          usdPerOutputToken = spotNum * ethUsd;
+          totalUsdVolume = amountInDecimal * ethUsd;
+        } else if (isOutputWETH) {
+          // Output is WETH, price WETH in USD (ethUsd)
+          usdPerOutputToken = ethUsd;
+          totalUsdVolume = amountOutDecimal * ethUsd;
+        } else {
+          // Neither is WETH. Total volume approximation warning logged.
+          console.log(
+            "Warning: USD volume is approximated as WETH/ETH is not in this pair."
+          );
+        }
+
+        // Secondary Fallback for Price
+        if (
+          usdPerOutputToken === 0 &&
+          totalUsdVolume > 0 &&
+          amountOutDecimal > 0
+        ) {
+          usdPerOutputToken = totalUsdVolume / amountOutDecimal;
+        }
+      }
+      // --- End USD CALCULATION ---
+
       console.log(
         `\n===== Swap ${index + 1} (${swap.protocol}, Pool: ${swap.pool}) =====`
       );
@@ -224,186 +368,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           swap.tick || "N/A"
         }`
       );
-      const { token0, token1 } = poolTokens[swap.pool] || {
-        token0: "",
-        token1: "",
-      };
-      if (!token0 || !token1) continue;
-      const token0Info = tokenInfos[token0] || UNKNOWN_TOKEN_INFO;
-      const token1Info = tokenInfos[token1] || UNKNOWN_TOKEN_INFO;
-      let isToken0In: boolean;
-      let inputTokenAddress: string;
-      let outputTokenAddress: string;
-      let inputInfo: TokenInfo;
-      let outputInfo: TokenInfo;
-      let swapAmountIn: bigint;
-      let swapAmountOut: bigint;
-      if (swap.protocol === "V3" || swap.protocol === "V4") {
-        isToken0In = swap.amount0 > 0n;
-        inputTokenAddress = isToken0In ? token0 : token1;
-        outputTokenAddress = isToken0In ? token1 : token0;
-        inputInfo = isToken0In ? token0Info : token1Info;
-        outputInfo = isToken0In ? token1Info : token0Info;
-        swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
-        swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
-      } else {
-        isToken0In = swap.amount0 > 0n;
-        inputTokenAddress = isToken0In ? token0 : token1;
-        outputTokenAddress = isToken0In ? token1 : token0;
-        inputInfo = isToken0In ? token0Info : token1Info;
-        outputInfo = isToken0In ? token1Info : token0Info;
-        swapAmountIn = isToken0In ? swap.amount0 : swap.amount1;
-        swapAmountOut = isToken0In ? -swap.amount1 : -swap.amount0;
-      }
-      const finalAmountIn = swapAmountIn;
-      const finalAmountOut = swapAmountOut;
-      const amountInDecimal = ethers.formatUnits(
-        finalAmountIn,
-        inputInfo.decimals
-      );
-      const amountOutDecimal = ethers.formatUnits(
-        finalAmountOut,
-        outputInfo.decimals
-      );
-
-      // Helper for human-readable formatting
-      const formatTinyNum = (num: number, isUsd: boolean = false): string => {
-        if (num === 0) return isUsd ? "$0.00" : "0";
-        if (num >= 0.01) {
-          // Standard formatting for values > $0.01 or 0.01
-          return isUsd ? `$${num.toFixed(2)}` : num.toFixed(4);
-        } else if (num >= 1e-6) {
-          // Keep 6 significant figures for values between 1e-6 and 0.01
-          return isUsd ? `$${num.toFixed(6)}` : num.toPrecision(6);
-        } else {
-          // For very tiny numbers, use toPrecision(3) to avoid rounding to zero,
-          // which will use scientific notation if necessary (e.g., 1.40e-7)
-          return isUsd ? `$${num.toPrecision(3)}` : num.toPrecision(6);
-        }
-      };
-
-      let spotNum =
-        parseFloat(amountInDecimal) / parseFloat(amountOutDecimal) || 0; // Default to effective
-
-      // Spot price calc for V2
-      if (swap.protocol === "V2") {
-        const reserves = poolReserves[swap.pool];
-        if (reserves) {
-          let reserveInRaw: bigint, reserveOutRaw: bigint;
-
-          // Determine which reserve corresponds to the input/output token
-          if (inputTokenAddress === token0) {
-            reserveInRaw = reserves.reserve0;
-            reserveOutRaw = reserves.reserve1;
-          } else {
-            // inputTokenAddress === token1
-            reserveInRaw = reserves.reserve1;
-            reserveOutRaw = reserves.reserve0;
-          }
-
-          // Calculate spotNum = (reserveInRaw / reserveOutRaw) * 10^(decOut - decIn)
-          const decDiff = outputInfo.decimals - inputInfo.decimals;
-          const adjustment = Math.pow(10, decDiff);
-          spotNum = (Number(reserveInRaw) / Number(reserveOutRaw)) * adjustment;
-          if (isNaN(spotNum) || !isFinite(spotNum)) {
-            spotNum = 0;
-          }
-        } else {
-          console.log(
-            "Debug: No reserves found for V2 pool, using effective price"
-          );
-        }
-      } else if (swap.protocol === "V3" && swap.sqrtPriceX96) {
-        // --- V3 Price Calculation Fix ---
-        // rawPrice = (sqrtPriceX96 / 2^96)^2 = token1 per token0 (raw, no decimals)
-        const Q96 = 2 ** 96;
-        const sqrtPrice = Number(swap.sqrtPriceX96) / Q96;
-        const rawPrice_token1_per_token0 = sqrtPrice ** 2;
-
-        // Adjust for decimals: token1 per token0 adjusted
-        const decDiff = token1Info.decimals - token0Info.decimals;
-        const poolPrice_adjusted =
-          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
-
-        // spotNum = input per output
-        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
-        if (isNaN(spotNum) || !isFinite(spotNum)) {
-          spotNum = 0;
-        }
-        // --- End V3 Price Calculation Fix ---
-      } else if (swap.protocol === "V4" && typeof swap.tick === "number") {
-        // V4 Price Calculation from tick
-        const log1p = Math.log(1.0001);
-        const exponent = swap.tick * log1p;
-        const rawPrice_token1_per_token0 = Math.exp(exponent);
-
-        // Adjust for decimals: token1 per token0 adjusted
-        const decDiff = token1Info.decimals - token0Info.decimals;
-        const poolPrice_adjusted =
-          rawPrice_token1_per_token0 * Math.pow(10, decDiff);
-
-        // spotNum = input per output
-        spotNum = isToken0In ? 1 / poolPrice_adjusted : poolPrice_adjusted;
-        if (isNaN(spotNum) || !isFinite(spotNum)) {
-          spotNum = 0;
-        }
-      }
-
-      // Calculate effective price as a fallback if spotNum is 0 (due to division by zero or no reserves)
-      if (spotNum === 0 && parseFloat(amountOutDecimal) > 0) {
-        spotNum = parseFloat(amountInDecimal) / parseFloat(amountOutDecimal);
-      }
-
-      let spotNativePrice = formatTinyNum(spotNum);
-
-      // --- REVISED USD CALCULATION ---
-      let totalUsdVolume = 0;
-      let usdPerOutputToken = 0;
-
-      const isInputWETH = inputTokenAddress.toLowerCase() === WETH_ADDRESS;
-      const isOutputWETH = outputTokenAddress.toLowerCase() === WETH_ADDRESS;
-      const amountInNum = parseFloat(amountInDecimal);
-      const amountOutNum = parseFloat(amountOutDecimal);
-
-      if (ethUsd > 0) {
-        if (isInputWETH) {
-          // Case 1: Input is WETH, Output is Token.
-          // spotNum = WETH / Output_Token (Price of 1 Output Token in WETH).
-          // USD/Output_Token = (WETH/Output_Token) * (USD/WETH)
-          if (spotNum > 0) {
-            usdPerOutputToken = spotNum * ethUsd;
-          }
-
-          // Total Volume is based on the WETH input side (most accurate leg)
-          totalUsdVolume = amountInNum * ethUsd;
-        } else if (isOutputWETH) {
-          // Case 2: Output is WETH, Input is Token.
-          // USD/Output_Token (WETH) is simply ethUsd.
-          usdPerOutputToken = ethUsd;
-
-          // Total Volume is based on the WETH output side (most accurate leg)
-          totalUsdVolume = amountOutNum * ethUsd;
-        } else {
-          // Case 3: Neither token is WETH/ETH. Cannot calculate USD price with current oracle.
-          console.log(
-            "Warning: USD volume is approximated as WETH/ETH is not in this pair."
-          );
-        }
-
-        // Secondary Fallback for Price: If total volume was calculated, but the per-token USD price was 0
-        // (e.g., due to spotNum being 0), use the effective trade price (Volume/Amount) as the price.
-        if (
-          usdPerOutputToken === 0 &&
-          totalUsdVolume > 0 &&
-          amountOutNum > 0 &&
-          (isInputWETH || isOutputWETH)
-        ) {
-          usdPerOutputToken = totalUsdVolume / amountOutNum;
-        }
-      }
-
-      // --- END REVISED USD CALCULATION ---
-
       console.log(`\n--- Formatted Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
       console.log(
@@ -420,7 +384,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           outputInfo.symbol
         )}`
       );
-
       console.log(
         `Spot Price: ${spotNativePrice} ${inputInfo.symbol} per ${
           outputInfo.symbol
@@ -429,12 +392,12 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
       );
 
+      // Construct TradeEvent
       tradeEvents.push({
         event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
         timestamp,
-        // The USD Price field MUST represent the Total USD Volume
         usdPrice: usdPerOutputToken.toFixed(6),
         nativePrice: `${spotNativePrice} ${inputInfo.symbol}/${outputInfo.symbol}`,
         volume: totalUsdVolume.toFixed(6),
@@ -445,7 +408,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           outputInfo.symbol !== "USDC" &&
           outputInfo.symbol !== "USDT"
             ? "BUY"
-            : "SELL",
+            : "SELL", // Logic for BUY/SELL remains the same
         pairAddress: swap.pool,
         programId: routerAddress,
         quoteToken: inputTokenAddress,
@@ -456,6 +419,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         protocol: swap.protocol,
       });
     }
+    // --- End Swap Analysis Loop ---
+
+    // --- Final Output ---
     if (tradeEvents.length > 0) {
       tradeEvents.forEach((event, index) => {
         console.log(
