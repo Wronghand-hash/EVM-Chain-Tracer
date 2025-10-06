@@ -6,6 +6,17 @@ import { formatAmount } from "./utils/utils"; // Used for display formatting
 // Constants
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const DEFAULT_DECIMALS = 18;
+// IPFS and Swarm gateways for robust fetching
+const IPFS_GATEWAYS = [
+  "https://ipfs.io/ipfs/",
+  "https://ipfs.cherrybot.ai/ipfs/",
+  "https://cloudflare-ipfs.com/ipfs/",
+];
+const SWARM_GATEWAYS = [
+  "https://gateway.ethswarm.org/bzz:/",
+  "https://swarm-gateways.net/bzz:/",
+  "https://bee.troopers.io/bzz:/", // Additional Swarm gateway
+];
 // Interface for the desired final output data
 interface TokenCreationData {
   tokenMint: string;
@@ -26,9 +37,9 @@ interface TokenCreationData {
 }
 /**
  * Analyzes a transaction to extract token creation details with minimal external calls.
- * Updated to fallback to fetching/parsing source code from Etherscan/IPFS for direct deploys.
- * Improved HTML parsing: extracts all <pre> blocks and selects the one containing Solidity source.
- * Uses alternative IPFS gateway (cherrybot.ai) for fetches.
+ * Extracts name/symbol from constructor args in tx input for direct deploys.
+ * Falls back to Etherscan overview scraping for verified contract metadata.
+ * Enhanced for robust IPFS/Swarm handling with headers.
  * @param txHash The transaction hash to analyze.
  */
 export async function analyzeTokenCreation(txHash: string): Promise<void> {
@@ -98,107 +109,224 @@ export async function analyzeTokenCreation(txHash: string): Promise<void> {
       to: firstMint.to,
       value: firstMint.value.toString(),
     };
-    // --- METADATA EXTRACTION FROM SOURCE (No Contract Calls) ---
+    // --- METADATA EXTRACTION FROM TX INPUT (For Direct Deploys, No External Calls) ---
     let fetchedName = "Unknown";
     let fetchedSymbol = "UNK";
     let fetchedDecimals = DEFAULT_DECIMALS;
     let fetchedTotalSupply = firstMint.value.toString(); // Use minted amount as total supply (common for initial mints)
 
-    // Fallback for direct deploys: Fetch source from Etherscan and parse for metadata
-    if (fetchedName === "Unknown") {
-      const contractAddr = finalData.tokenMint;
-      const etherscanUrl = `https://etherscan.io/address/${contractAddr}#code`;
+    // Parse constructor args for standard ERC20 if direct deploy
+    if (txTo === "0x" && transaction.data && transaction.data.length > 10) {
+      // Try constructor with decimals first
+      const ERC20_ABI_WITH_DEC = [
+        "constructor(string name, string symbol, uint8 decimals)",
+      ];
+      const ERC20_ABI_WITHOUT_DEC = ["constructor(string name, string symbol)"];
+      let parsed = null;
       try {
-        const response = await fetch(etherscanUrl);
+        const ifaceWithDec = new Interface(ERC20_ABI_WITH_DEC);
+        parsed = ifaceWithDec.parseTransaction({ data: transaction.data });
+        if (parsed && parsed.name === "constructor") {
+          fetchedName = parsed.args.name;
+          fetchedSymbol = parsed.args.symbol;
+          fetchedDecimals = Number(parsed.args.decimals);
+          console.log(
+            `Extracted metadata from constructor args (with decimals): ${fetchedName} (${fetchedSymbol}), decimals: ${fetchedDecimals}`
+          );
+        }
+      } catch {}
+
+      if (fetchedName === "Unknown") {
+        try {
+          const ifaceWithoutDec = new Interface(ERC20_ABI_WITHOUT_DEC);
+          parsed = ifaceWithoutDec.parseTransaction({ data: transaction.data });
+          if (parsed && parsed.name === "constructor") {
+            fetchedName = parsed.args.name;
+            fetchedSymbol = parsed.args.symbol;
+            console.log(
+              `Extracted metadata from constructor args (without decimals): ${fetchedName} (${fetchedSymbol})`
+            );
+          }
+        } catch {}
+      }
+    }
+
+    // Fallback: Fetch/parse from Etherscan if metadata still unknown (e.g., for decimals override)
+    if (fetchedName === "Unknown" || fetchedDecimals === DEFAULT_DECIMALS) {
+      const contractAddr = finalData.tokenMint;
+      // Use base URL for overview metadata (more reliable)
+      const etherscanUrl = `https://etherscan.io/address/${contractAddr}`;
+      try {
+        const fetchOptions = {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; TokenAnalyzer/1.0)",
+          }, // Helps with gateway compatibility
+        };
+        const response = await fetch(etherscanUrl, fetchOptions);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();
 
-        // First, try to extract IPFS/Swarm hash
-        let hashMatch = html.match(/(?:ipfs|swarm|bzz):\/\/([a-f0-9]{64})/i);
-        let source = "";
-        if (hashMatch) {
-          const hash = hashMatch[1];
-          console.log(`Found hash: ${hash}, attempting IPFS fetch...`);
-          // Try IPFS with cherrybot.ai gateway
-          let ipfsUrl = `https://ipfs.cherrybot.ai/ipfs/${hash}`;
-          let ipfsResponse = await fetch(ipfsUrl);
-          if (ipfsResponse.ok) {
-            source = await ipfsResponse.text();
-          } else {
-            console.warn(
-              `Cherrybot IPFS fetch failed (${ipfsResponse.status}), trying Swarm...`
-            );
-            // Try Swarm
-            const swarmUrl = `https://gateway.ethswarm.org/bzz:/${hash}/`;
-            const swarmResponse = await fetch(swarmUrl);
-            if (swarmResponse.ok) {
-              source = await swarmResponse.text();
-            } else {
-              console.warn(`Swarm fetch failed (${swarmResponse.status})`);
-            }
-          }
+        // Extract metadata from Etherscan overview (refined regex for robustness)
+        // Name: Matches "Contract Name:</span> Manyu" or similar variations
+        let nameMatch = html.match(
+          /Contract Name\s*[:<]?\s*<\/?span[^>]*>\s*([A-Za-z\s]+?)(?=<|<\/div>)/i
+        );
+        if (!nameMatch)
+          nameMatch = html.match(
+            /Contract Name[^:]*:\s*([A-Za-z\s]+?)(?=\s*<)/i
+          );
+        if (nameMatch && fetchedName === "Unknown") {
+          fetchedName = nameMatch[1].trim();
+          console.log(`Extracted name from overview: ${fetchedName}`);
         }
 
-        // If no hash or fetch failed, extract from Etherscan HTML source display
-        if (!source) {
-          // Improved: Extract all <pre> blocks and select the Solidity source one
-          const preRegex = /<pre[^>]*>([\s\S]*?)<\/pre>/gi;
-          let match;
-          let candidates: string[] = [];
-          while ((match = preRegex.exec(html)) !== null) {
-            let candidate = match[1]
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-              .replace(/&amp;/g, "&")
-              .replace(/&nbsp;/g, " ")
-              .replace(/<br\s*\/?>/gi, "\n")
-              .replace(/&\#xA;/g, "\n")
-              .trim();
-            // Filter for Solidity source: contains 'pragma solidity' and not just hex-like
-            if (
-              candidate.includes("pragma solidity") &&
-              !/^[0-9a-f]+$/i.test(candidate.replace(/\s/g, ""))
-            ) {
-              candidates.push(candidate);
-            }
-          }
-          if (candidates.length > 0) {
-            source = candidates[0]; // Take the first valid one
-            console.log(
-              `Extracted Solidity source from Etherscan HTML (${candidates.length} candidates).`
-            );
-          } else {
-            console.warn("No valid Solidity source <pre> found in HTML.");
-          }
+        // Symbol: Matches "Token Symbol:</span> MANYU" or "Symbol:</span> MANYU"
+        let symbolMatch = html.match(
+          /Symbol\s*[:<]?\s*<\/?span[^>]*>\s*([A-Z]{2,10})(?=<|<\/div>)/i
+        );
+        if (!symbolMatch)
+          symbolMatch = html.match(/Symbol[^:]*:\s*([A-Z]{2,10})(?=\s*<)/i);
+        if (symbolMatch && fetchedSymbol === "UNK") {
+          fetchedSymbol = symbolMatch[1];
+          console.log(`Extracted symbol from overview: ${fetchedSymbol}`);
         }
 
-        if (source) {
-          // Parse source for ERC20 constructor
-          const erc20Match = source.match(
-            /ERC20\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/
-          );
-          if (erc20Match) {
-            fetchedName = erc20Match[1];
-            fetchedSymbol = erc20Match[2];
-            console.log(
-              `Extracted metadata from source: ${fetchedName} (${fetchedSymbol})`
-            );
-          }
+        // Decimals: Matches "Decimals:</span> 9"
+        let decMatchOverview = html.match(
+          /Decimals\s*[:<]?\s*<\/?span[^>]*>\s*(\d+)(?=<|<\/div>)/i
+        );
+        if (!decMatchOverview)
+          decMatchOverview = html.match(/Decimals[^:]*:\s*(\d+)(?=\s*<)/i);
+        if (decMatchOverview && fetchedDecimals === DEFAULT_DECIMALS) {
+          fetchedDecimals = parseInt(decMatchOverview[1]);
+          console.log(`Extracted decimals from overview: ${fetchedDecimals}`);
+        }
 
-          // Parse for decimals override
-          const decMatch = source.match(
-            /function\s+decimals\s*\(\)\s*(public|view|pure|external)?\s*(virtual\s+override\s+)?returns\s*\(\s*uint8\s*\)\s*\{?\s*return\s+(\d+);/i
-          );
-          if (decMatch) {
-            fetchedDecimals = parseInt(decMatch[3]);
-            console.log(`Extracted decimals from source: ${fetchedDecimals}`);
-          }
+        // If overview extraction succeeded, skip further fetching
+        if (
+          fetchedName !== "Unknown" &&
+          fetchedSymbol !== "UNK" &&
+          fetchedDecimals !== DEFAULT_DECIMALS
+        ) {
+          console.log("Metadata fully extracted from Etherscan overview.");
         } else {
-          console.warn("No source code found on Etherscan.");
+          // Fallback to source extraction (now fetch #code tab for embedded source)
+          const codeUrl = `https://etherscan.io/address/${contractAddr}#code`;
+          const codeResponse = await fetch(codeUrl, fetchOptions);
+          if (codeResponse.ok) {
+            const codeHtml = await codeResponse.text();
+            // Extract protocol and hash from code tab
+            const protocolMatch = codeHtml.match(
+              /(ipfs|swarm|bzz):\/\/([a-f0-9]{64})/i
+            );
+            let source = "";
+            if (protocolMatch) {
+              const protocol = protocolMatch[1].toLowerCase();
+              const hash = protocolMatch[2];
+              console.log(
+                `Found ${protocol.toUpperCase()} hash: ${hash}, attempting fetch...`
+              );
+              const gateways =
+                protocol === "ipfs" ? IPFS_GATEWAYS : SWARM_GATEWAYS;
+              for (const gw of gateways) {
+                try {
+                  const gwUrl = `${gw}${hash}`;
+                  const gwResponse = await fetch(gwUrl, fetchOptions);
+                  if (gwResponse.ok) {
+                    source = await gwResponse.text();
+                    console.log(`Fetched source from ${gw}`);
+                    break;
+                  } else {
+                    console.warn(`Gateway ${gw} failed: ${gwResponse.status}`);
+                  }
+                } catch (gwErr) {
+                  console.warn(`Gateway ${gw} error: ${gwErr}`);
+                }
+              }
+            }
+
+            // If no hash/fetch, extract embedded source from #code HTML
+            if (!source) {
+              const preRegex =
+                /<pre[^>]*id=["']?contractSourceCode["']?[^>]*>([\s\S]*?)<\/pre>/i;
+              let preMatch = preRegex.exec(codeHtml);
+              if (!preMatch) {
+                // Broader fallback
+                const broadRegex = /<pre[^>]*>([\s\S]*?)<\/pre>/gi;
+                let broadMatch;
+                while ((broadMatch = broadRegex.exec(codeHtml)) !== null) {
+                  let candidate = broadMatch[1]
+                    .replace(/&lt;/g, "<")
+                    .replace(/&gt;/g, ">")
+                    .replace(/&quot;/g, '"')
+                    .replace(/&amp;/g, "&")
+                    .replace(/&nbsp;/g, " ")
+                    .replace(/<br\s*\/?>/gi, "\n")
+                    .replace(/&\#xA;/g, "\n")
+                    .trim();
+                  if (
+                    candidate.includes("pragma solidity") &&
+                    !/^[0-9a-f]+$/i.test(candidate.replace(/\s/g, ""))
+                  ) {
+                    source = candidate;
+                    console.log(
+                      "Extracted embedded Solidity source from Etherscan #code tab."
+                    );
+                    break;
+                  }
+                }
+              } else {
+                source = preMatch[1]
+                  .replace(/&lt;/g, "<")
+                  .replace(/&gt;/g, ">")
+                  .replace(/&quot;/g, '"')
+                  .replace(/&amp;/g, "&")
+                  .replace(/&nbsp;/g, " ")
+                  .replace(/<br\s*\/?>/gi, "\n")
+                  .replace(/&\#xA;/g, "\n")
+                  .trim();
+                console.log("Extracted source from #contractSourceCode <pre>.");
+              }
+            }
+
+            if (source && fetchedName === "Unknown") {
+              // Fallback regex for hardcoded ERC20
+              const erc20Match = source.match(
+                /ERC20\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/
+              );
+              if (erc20Match) {
+                fetchedName = erc20Match[1];
+                fetchedSymbol = erc20Match[2];
+                console.log(
+                  `Extracted metadata from source: ${fetchedName} (${fetchedSymbol})`
+                );
+              }
+            }
+
+            if (source) {
+              // Parse for decimals override
+              const decMatch = source.match(
+                /function\s+decimals\s*\(\)\s*(public|view|pure|external)?\s*(virtual\s+override\s+)?returns\s*\(\s*uint8\s*\)\s*\{?\s*return\s+(\d+);/i
+              );
+              if (
+                decMatch &&
+                (fetchedDecimals === DEFAULT_DECIMALS ||
+                  fetchedDecimals === undefined)
+              ) {
+                fetchedDecimals = parseInt(decMatch[3]);
+                console.log(
+                  `Extracted decimals from source: ${fetchedDecimals}`
+                );
+              }
+            } else if (fetchedName === "Unknown") {
+              console.warn("No source code found on Etherscan.");
+            }
+          } else {
+            console.warn(`Failed to fetch #code tab: ${codeResponse.status}`);
+          }
         }
       } catch (e) {
-        console.warn(`Failed to fetch/parse Etherscan/IPFS/Swarm source: ${e}`);
+        console.warn(`Failed to fetch/parse Etherscan source: ${e}`);
       }
     }
 
