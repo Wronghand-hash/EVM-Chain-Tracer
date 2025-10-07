@@ -45,3 +45,35 @@ export interface TradeEvent {
   walletAddress: string;
   protocol: "V2" | "V3" | "V4";
 }
+
+// vetsion 4 uniswap token creation
+
+export interface PoolCreationData {
+  poolId: string;
+  currency0: string;
+  currency1: string;
+  token0Name: string;
+  token0Symbol: string;
+  token0Decimals?: number;
+  token1Name: string;
+  token1Symbol: string;
+  token1Decimals?: number;
+  fee: number;
+  tickSpacing: number;
+  hooks: string;
+  sqrtPriceX96: string;
+  tick: number;
+  creatorAddress: string;
+  hash: string;
+}
+export interface TokenCreationData {
+  tokenMint: string;
+  name: string;
+  symbol: string;
+  creatorAddress: string;
+  programId: string;
+  decimals?: number;
+  tokenBalanceChanges?: string;
+  hash: string;
+  totalSupply?: string;
+}

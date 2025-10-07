@@ -155,3 +155,17 @@ export const transferIface = new Interface(erc20TransferAbi);
 export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
 export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
 export const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
+
+// version 4 uniswap token creation
+
+// Constants
+export const DEFAULT_DECIMALS = 18;
+export const TRANSFER_TOPIC_V4 =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f1606f49c0f4f7d4e3b4d8f0a7";
+export const ZERO_HASH =
+  "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+// ABI fragment for Initialize event
+export const INITIALIZE_ABI = [
+  "event Initialize(bytes32 indexed id, address indexed sender, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
+];
