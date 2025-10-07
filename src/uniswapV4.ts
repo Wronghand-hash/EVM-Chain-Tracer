@@ -476,6 +476,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           : `${token1Info.symbol} -> ETH`,
         walletAddress: userWallet,
         protocol: "V4",
+        targetTokenMint: ""
       });
     }
     if (tradeEvents.length > 0) {
