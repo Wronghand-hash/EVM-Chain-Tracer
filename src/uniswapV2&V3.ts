@@ -1,4 +1,4 @@
-import { AbiCoder, ethers, Interface } from "ethers";
+import { ethers, Interface, AbiCoder } from "ethers";
 import {
   provider,
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
@@ -98,6 +98,34 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       const logAddrLower = log.address.toLowerCase();
       tokenAddresses.add(logAddrLower);
 
+      // Early detection for token mints (Transfers from 0x0)
+      if (topic0 === TRANSFER_TOPIC?.toLowerCase()) {
+        try {
+          const parsed = transferIface.parseLog(log);
+          if (parsed) {
+            const transfer: Transfer = {
+              token: logAddrLower,
+              from: parsed.args.from.toLowerCase(),
+              to: parsed.args.to.toLowerCase(),
+              value: parsed.args.value,
+            };
+            transfers.push(transfer);
+
+            // Flag mints (from zero address)
+            if (
+              transfer.from === "0x0000000000000000000000000000000000000000"
+            ) {
+              console.log(
+                `Mint detected: ${ethers.formatUnits(
+                  transfer.value,
+                  18
+                )} of token ${transfer.token} to ${transfer.to}`
+              );
+            }
+          }
+        } catch {} // Silent fail for non-ERC20/unknown transfers
+      }
+
       if (
         topic0 === V2_SWAP_EVENT_TOPIC?.toLowerCase() ||
         topic0 === V3_SWAP_EVENT_TOPIC?.toLowerCase()
@@ -163,7 +191,7 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
 
             const token0 = poolKey[0].toLowerCase(); // currency0
             const token1 = poolKey[1].toLowerCase(); // currency1
-            poolTokens[poolId] = { token0, token1 };
+            poolTokens[poolId] = { token0, token1 }; // Save V4 token info here
             poolAddresses.add(poolId);
             v4PoolIds.add(poolId);
             tokenAddresses.add(token0);
@@ -196,7 +224,22 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
     const mints: Transfer[] = transfers.filter(
       (t) => t.from === "0x0000000000000000000000000000000000000000"
     );
-    // --- End Mint Filtering ---
+
+    // --- Debug: Log all mints ---
+    if (mints.length > 0) {
+      console.log(
+        `All mints in tx: ${mints
+          .map(
+            (m) =>
+              `${ethers.formatUnits(
+                m.value,
+                tokenInfos[m.token]?.decimals || 18
+              )} of ${tokenInfos[m.token]?.symbol || m.token} to ${m.to}`
+          )
+          .join(", ")}`
+      );
+    }
+    // --- End Debug ---
 
     // --- Concurrent Data Fetching ---
     const tokenInfos: { [address: string]: TokenInfo } = {};
