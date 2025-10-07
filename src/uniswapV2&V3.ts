@@ -1,4 +1,4 @@
-import { ethers, Interface } from "ethers";
+import { AbiCoder, ethers, Interface } from "ethers";
 import {
   provider,
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
@@ -142,8 +142,10 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
           const parsed = v4SwapIface.parseLog(log);
           if (parsed && parsed.args) {
             const poolKey = parsed.args.key;
-            // Keccak256 hash of the RLP-encoded PoolKey struct (as bytes) is the pool ID
-            const poolKeyBytes = v4Iface.encodeStruct("PoolKey", [poolKey]);
+            // Encode PoolKey struct for pool ID derivation
+            const abiCoder = AbiCoder.defaultAbiCoder();
+            const poolKeyType = "(address,address,uint24,int24,address)";
+            const poolKeyBytes = abiCoder.encode([poolKeyType], [poolKey]);
             const poolId = ethers.keccak256(poolKeyBytes);
 
             const swapEvent: SwapEvent = {
@@ -159,9 +161,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
             };
             swaps.push(swapEvent);
 
-            const token0 = poolKey.currency0.toLowerCase();
-            const token1 = poolKey.currency1.toLowerCase();
-            poolTokens[poolId] = { token0, token1 }; // Save V4 token info here
+            const token0 = poolKey[0].toLowerCase(); // currency0
+            const token1 = poolKey[1].toLowerCase(); // currency1
+            poolTokens[poolId] = { token0, token1 };
             poolAddresses.add(poolId);
             v4PoolIds.add(poolId);
             tokenAddresses.add(token0);
@@ -170,18 +172,6 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         } catch (e) {
           console.warn(`Failed to parse V4 Swap event: ${e}`);
         }
-      } else if (topic0 === TRANSFER_TOPIC?.toLowerCase()) {
-        try {
-          const parsed = transferIface.parseLog(log);
-          if (parsed) {
-            transfers.push({
-              token: logAddrLower,
-              from: parsed.args.from.toLowerCase(),
-              to: parsed.args.to.toLowerCase(),
-              value: parsed.args.value,
-            });
-          }
-        } catch {} // Silent fail for non-ERC20/unknown transfers
       } else if (topic0 === V2_SYNC_EVENT_TOPIC?.toLowerCase()) {
         try {
           const parsed = v2SyncIface.parseLog(log);
@@ -201,6 +191,12 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
       }
     }
     // --- End Log Parsing Loop ---
+
+    // --- Mint Filtering (post-parsing for target token checks later) ---
+    const mints: Transfer[] = transfers.filter(
+      (t) => t.from === "0x0000000000000000000000000000000000000000"
+    );
+    // --- End Mint Filtering ---
 
     // --- Concurrent Data Fetching ---
     const tokenInfos: { [address: string]: TokenInfo } = {};
@@ -375,6 +371,27 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         usdPerBaseToken = totalUsdVolume / amountBaseDecimal;
       }
       // --- End USD CALCULATION ---
+
+      // --- Target Token Mint Detection ---
+      let targetTokenMintAmount: bigint | null = null;
+      const targetMints = mints.filter(
+        (m) => m.token.toLowerCase() === baseTokenAddress.toLowerCase()
+      );
+      if (targetMints.length > 0) {
+        // Sum mints for target token if multiple
+        targetTokenMintAmount = targetMints.reduce(
+          (acc, m) => acc + m.value,
+          0n
+        );
+        console.log(
+          `Target token (${baseSymbol}) mint detected: ${ethers.formatUnits(
+            targetTokenMintAmount,
+            baseInfo.decimals
+          )} tokens`
+        );
+      }
+      // --- End Target Token Mint Detection ---
+
       console.log(
         `\n===== Swap ${index + 1} (${swap.protocol}, Pool: ${swap.pool}) =====`
       );
@@ -432,6 +449,9 @@ export async function analyzeTransaction(txHash: string): Promise<void> {
         volume: totalUsdVolume.toFixed(10),
         inputVolume: finalAmountIn.toString(),
         mint: isWethInvolved ? baseTokenAddress : outputTokenAddress,
+        targetTokenMint: targetTokenMintAmount
+          ? targetTokenMintAmount.toString()
+          : "",
         type: isWethInvolved
           ? isBuy
             ? "BUY"
