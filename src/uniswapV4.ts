@@ -7,6 +7,8 @@ import {
   v4SwapIface,
   UNKNOWN_TOKEN_INFO,
   WETH_ADDRESS,
+  V3_SWAP_EVENT_TOPIC,
+  v3SwapIface,
 } from "./types/constants";
 import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "./types/types";
 import { getTokenInfo, formatAmount, fetchEthPriceUsd } from "./utils/utils";
@@ -44,10 +46,15 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     );
     const iface = new ethers.Interface(uniswapV4PoolManagerAbi);
     const swapSelector = iface.getFunction("swap")!.selector;
-    const swaps: SwapEvent[] = [];
+    const v4Swaps: SwapEvent[] = [];
+    const v3Swaps: SwapEvent[] = [];
     const tokenAddresses = new Set<string>();
-    const poolIds = new Set<string>();
-    const poolKeys: {
+    const v4PoolIds = new Set<string>();
+    const v3PoolIds = new Set<string>();
+    const poolKeysV4: {
+      [poolId: string]: { currency0: string; currency1: string };
+    } = {};
+    const poolKeysV3: {
       [poolId: string]: { currency0: string; currency1: string };
     } = {};
     const transfers: Transfer[] = [];
@@ -79,13 +86,13 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
             [key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks]
           )
         );
-        poolKeys[poolId] = {
+        poolKeysV4[poolId] = {
           currency0: key.currency0.toLowerCase(),
           currency1: key.currency1.toLowerCase(),
         };
         tokenAddresses.add(key.currency0.toLowerCase());
         tokenAddresses.add(key.currency1.toLowerCase());
-        poolIds.add(poolId);
+        v4PoolIds.add(poolId);
       }
     } catch {
       console.warn(`Failed to parse direct swap call.`);
@@ -104,10 +111,10 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
             const { amount0, amount1 } = parsedLog.args;
             if (amount0 === 0n && amount1 === 0n) continue;
             const poolId = parsedLog.args.id.toLowerCase();
-            swaps.push({
+            v4Swaps.push({
               pool: poolId,
               sender: parsedLog.args.sender.toLowerCase(),
-              recipient: userWallet,
+              recipient: parsedLog.args.recipient?.toLowerCase() || userWallet,
               amount0,
               amount1,
               protocol: "V4",
@@ -115,7 +122,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
               sqrtPriceX96: parsedLog.args.sqrtPriceX96,
               liquidity: parsedLog.args.liquidity,
             });
-            poolIds.add(poolId);
+            v4PoolIds.add(poolId);
           }
         } catch (e) {
           console.warn(
@@ -126,11 +133,10 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         }
       }
     }
-    if (swaps.length === 0) {
+    if (v4Swaps.length === 0) {
       console.log("No V4 Swap events found.");
-      return;
     }
-    // Infer Pool Keys from Initialize Event
+    // Infer V4 Pool Keys from Initialize Event
     for (const log of receipt.logs) {
       const topic0 = log.topics[0]?.toLowerCase();
       const logAddrLower = log.address.toLowerCase();
@@ -144,10 +150,10 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
             const poolId = parsedLog.args.id.toLowerCase();
             const currency0 = parsedLog.args.currency0.toLowerCase();
             const currency1 = parsedLog.args.currency1.toLowerCase();
-            poolKeys[poolId] = { currency0, currency1 };
+            poolKeysV4[poolId] = { currency0, currency1 };
             tokenAddresses.add(currency0);
             tokenAddresses.add(currency1);
-            poolIds.add(poolId);
+            v4PoolIds.add(poolId);
           }
         } catch (e) {
           console.warn(
@@ -167,26 +173,29 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         valueToTokens[valStr].push(t.token);
       }
     }
-    // Enhanced Transfer Matching using value matches (user-agnostic for inference)
     const hasEthInput = transaction.value > 0n;
-    for (const swap of swaps) {
+
+    // --- START: V4 Pool Key Inference (Updated) ---
+    const poolToSwapsV4: { [poolId: string]: SwapEvent[] } = {};
+    for (const swap of v4Swaps) {
+      if (!poolToSwapsV4[swap.pool]) {
+        poolToSwapsV4[swap.pool] = [];
+      }
+      poolToSwapsV4[swap.pool].push(swap);
+    }
+
+    for (const swap of v4Swaps) {
       const poolId = swap.pool;
-      if (poolKeys[poolId]) continue;
+      if (poolKeysV4[poolId]) continue; // Skip if already inferred from Initialize or call data
       let inAmount: bigint;
       let outAmount: bigint;
-      let inputSideIsZero: boolean;
       if (swap.amount0 > 0n && swap.amount1 < 0n) {
         inAmount = swap.amount0;
         outAmount = -swap.amount1;
-        inputSideIsZero = true;
       } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
         inAmount = swap.amount1;
         outAmount = -swap.amount0;
-        inputSideIsZero = false;
       } else {
-        console.warn(
-          `Invalid swap deltas for pool ${poolId}. Skipping inference.`
-        );
         continue;
       }
       let inputToken: string | null = null;
@@ -214,38 +223,24 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         currencies = [outputToken, WETH_ADDRESS].sort();
       }
       if (currencies.length === 2) {
-        poolKeys[poolId] = {
+        poolKeysV4[poolId] = {
           currency0: currencies[0],
           currency1: currencies[1],
         };
         tokenAddresses.add(currencies[0]);
         tokenAddresses.add(currencies[1]);
         console.log(
-          `Inferred poolKey from transfer values for ${poolId}: ${currencies[0]}/${currencies[1]}`
+          `Inferred V4 poolKey from transfer values for ${poolId}: ${currencies[0]}/${currencies[1]}`
         );
       }
     }
-    // Enhanced Fallback: Per-pool, filter tokens by matching delta values from swaps in that pool
-    const poolToSwaps: { [poolId: string]: SwapEvent[] } = {};
-    for (const swap of swaps) {
-      if (!poolToSwaps[swap.pool]) {
-        poolToSwaps[swap.pool] = [];
-      }
-      poolToSwaps[swap.pool].push(swap);
-    }
-    for (const poolId of poolIds) {
-      if (poolKeys[poolId]) {
-        const key = poolKeys[poolId];
-        if (key.currency0 === key.currency1) {
-          delete poolKeys[poolId]; // Invalidate same-token keys
-        } else {
-          continue;
-        }
-      }
-      if (!poolToSwaps[poolId]) continue;
+    // Fallback for V4 pool key inference
+    for (const poolId of v4PoolIds) {
+      if (poolKeysV4[poolId]) continue;
+      if (!poolToSwapsV4[poolId]) continue;
       const relevantValues = new Set<string>();
-      for (const swap of poolToSwaps[poolId]) {
-        relevantValues.add(swap.amount0.toString().replace("-", "")); // absolute
+      for (const swap of poolToSwapsV4[poolId]) {
+        relevantValues.add(swap.amount0.toString().replace("-", ""));
         relevantValues.add(swap.amount1.toString().replace("-", ""));
       }
       const matchedTokens = new Set<string>();
@@ -258,50 +253,121 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       }
       let currency0: string, currency1: string;
       const matchedArray = Array.from(matchedTokens);
-      if (matchedArray.length === 0 && hasEthInput) {
-        console.warn(`No matched tokens for ${poolId}. Skipping.`);
-        continue;
+      if (matchedArray.length === 2) {
+        [currency0, currency1] = matchedArray.sort();
       } else if (matchedArray.length === 1) {
         const tokenA = matchedArray[0];
-        if (tokenA === WETH_ADDRESS.toLowerCase()) {
-          console.warn(`Only WETH matched for ${poolId}. Skipping.`);
-          continue;
-        }
+        if (tokenA === WETH_ADDRESS.toLowerCase()) continue;
         const pair = [tokenA, WETH_ADDRESS].sort();
         currency0 = pair[0];
         currency1 = pair[1];
         console.warn(
-          `Inferred poolKey (HEURISTIC: 1 matched + WETH) for ${poolId}: ${currency0}/${currency1}`
+          `Inferred V4 poolKey (HEURISTIC: 1 matched + WETH) for ${poolId}: ${currency0}/${currency1}`
         );
-      } else if (matchedArray.length === 2) {
-        [currency0, currency1] = matchedArray.sort();
-      } else if (matchedArray.length > 2) {
-        console.warn(`Too many matched tokens for ${poolId}. Skipping.`);
-        continue;
       } else {
-        // Fallback to general heuristic if no matches
-        const potentialTokensSet = new Set(
-          receipt.logs
-            .filter((l) => l.topics[0]?.toLowerCase() === transferTopicHash)
-            .map((l) => l.address.toLowerCase())
-        );
-        const adjustedPotentialTokens = Array.from(potentialTokensSet).filter(
+        console.warn(`Cannot infer V4 poolKey for ${poolId}. Skipping pool.`);
+        continue;
+      }
+      poolKeysV4[poolId] = { currency0, currency1 };
+      tokenAddresses.add(currency0);
+      tokenAddresses.add(currency1);
+    }
+    // --- END: V4 Pool Key Inference ---
+
+    // Process V3 inference (unchanged, as V3 is typically a single swap per log)
+    for (const swap of v3Swaps) {
+      const poolId = swap.pool;
+      if (poolKeysV3[poolId]) continue;
+      let inAmount: bigint;
+      let outAmount: bigint;
+      if (swap.amount0 > 0n && swap.amount1 < 0n) {
+        inAmount = swap.amount0;
+        outAmount = -swap.amount1;
+      } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
+        inAmount = swap.amount1;
+        outAmount = -swap.amount0;
+      } else {
+        continue;
+      }
+      const poolAddress = poolId;
+      let inputToken: string | null = null;
+      const inValStr = inAmount.toString();
+      if (valueToTokens[inValStr]) {
+        const cands = valueToTokens[inValStr].filter(
           (t) => t !== WETH_ADDRESS.toLowerCase()
         );
-        if (adjustedPotentialTokens.length === 1) {
-          const tokenA = adjustedPotentialTokens[0];
-          const pair = [tokenA, WETH_ADDRESS].sort();
-          currency0 = pair[0];
-          currency1 = pair[1];
-          console.warn(
-            `Inferred poolKey (GENERAL HEURISTIC) for ${poolId}: ${currency0}/${currency1}`
-          );
-        } else {
-          console.warn(`Cannot infer poolKey for ${poolId}. Skipping pool.`);
-          continue;
+        inputToken = cands.length > 0 ? cands[0] : valueToTokens[inValStr][0];
+      }
+      let outputToken: string | null = null;
+      const outValStr = outAmount.toString();
+      if (valueToTokens[outValStr]) {
+        const cands = valueToTokens[outValStr].filter(
+          (t) => t !== WETH_ADDRESS.toLowerCase()
+        );
+        outputToken = cands.length > 0 ? cands[0] : valueToTokens[outValStr][0];
+      }
+      let currencies: string[] = [];
+      if (inputToken && outputToken && inputToken !== outputToken) {
+        currencies = [inputToken, outputToken].sort();
+      } else if (inputToken && inputToken !== WETH_ADDRESS.toLowerCase()) {
+        currencies = [inputToken, WETH_ADDRESS].sort();
+      } else if (outputToken && outputToken !== WETH_ADDRESS.toLowerCase()) {
+        currencies = [outputToken, WETH_ADDRESS].sort();
+      }
+      if (currencies.length === 2) {
+        poolKeysV3[poolId] = {
+          currency0: currencies[0],
+          currency1: currencies[1],
+        };
+        tokenAddresses.add(currencies[0]);
+        tokenAddresses.add(currencies[1]);
+        console.log(
+          `Inferred V3 poolKey from transfer values for ${poolId}: ${currencies[0]}/${currencies[1]}`
+        );
+      }
+    }
+    // Fallback for V3
+    for (const poolId of v3PoolIds) {
+      if (poolKeysV3[poolId]) continue;
+      const relevantValues = new Set<string>();
+      relevantValues.add(
+        v3Swaps
+          .find((s) => s.pool === poolId)
+          ?.amount0.toString()
+          .replace("-", "") || "0"
+      );
+      relevantValues.add(
+        v3Swaps
+          .find((s) => s.pool === poolId)
+          ?.amount1.toString()
+          .replace("-", "") || "0"
+      );
+      const matchedTokens = new Set<string>();
+      for (const valStr of relevantValues) {
+        if (valueToTokens[valStr]) {
+          for (const tok of valueToTokens[valStr]) {
+            matchedTokens.add(tok);
+          }
         }
       }
-      poolKeys[poolId] = { currency0, currency1 };
+      let currency0: string, currency1: string;
+      const matchedArray = Array.from(matchedTokens);
+      if (matchedArray.length === 2) {
+        [currency0, currency1] = matchedArray.sort();
+      } else if (matchedArray.length === 1) {
+        const tokenA = matchedArray[0];
+        if (tokenA === WETH_ADDRESS.toLowerCase()) continue;
+        const pair = [tokenA, WETH_ADDRESS].sort();
+        currency0 = pair[0];
+        currency1 = pair[1];
+        console.warn(
+          `Inferred V3 poolKey (HEURISTIC: 1 matched + WETH) for ${poolId}: ${currency0}/${currency1}`
+        );
+      } else {
+        console.warn(`Cannot infer V3 poolKey for ${poolId}. Skipping pool.`);
+        continue;
+      }
+      poolKeysV3[poolId] = { currency0, currency1 };
       tokenAddresses.add(currency0);
       tokenAddresses.add(currency1);
     }
@@ -320,128 +386,65 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         .filter((t) => t !== ETH_ADDRESS)
         .map((t) => getTokenInfo(t).then((info) => (tokenInfos[t] = info)))
     );
-    const ethUsd = (await fetchEthPriceUsd()) || 0;
-    // Aggregate swaps per pool
-    const poolNets: {
-      [poolId: string]: {
-        netAmount0: bigint;
-        netAmount1: bigint;
-        sqrtPriceX96: bigint;
-        tick: number;
-      };
-    } = {};
-    for (const poolId in poolToSwaps) {
-      let net0 = 0n;
-      let net1 = 0n;
-      let lastSqrt = 0n;
-      let lastTick = 0;
-      for (const s of poolToSwaps[poolId]) {
-        net0 += s.amount0;
-        net1 += s.amount1;
-        lastSqrt = s.sqrtPriceX96 || 0n;
-        lastTick = s.tick || 0;
-      }
-      poolNets[poolId] = {
-        netAmount0: net0,
-        netAmount1: net1,
-        sqrtPriceX96: lastSqrt,
-        tick: lastTick,
-      };
+    // --- DEBUGGING: Log Decimals ---
+    for (const addr in tokenInfos) {
+      const info = tokenInfos[addr];
+      console.log(
+        `[DEBUG] Token ${info.symbol} (${addr}) Decimals: ${info.decimals}`
+      );
     }
+    // --- END DEBUGGING ---
+    const ethUsd = (await fetchEthPriceUsd()) || 0;
     const tradeEvents: TradeEvent[] = [];
-    let index = 1;
-    for (const [poolId, net] of Object.entries(poolNets)) {
-      const poolKey = poolKeys[poolId];
+    // --- START: V4 Trade Event Processing (Fixed to process individual swaps) ---
+    let v4Index = 1;
+    for (const swap of v4Swaps) {
+      const poolId = swap.pool;
+      const poolKey = poolKeysV4[poolId];
       if (!poolKey) {
-        console.warn(`No poolKey for pool ${index}. Skipping.`);
-        index++;
+        console.warn(`No V4 poolKey for swap ${v4Index}. Skipping.`);
+        v4Index++;
         continue;
       }
       const { currency0, currency1 } = poolKey;
       const token0Info = tokenInfos[currency0] || UNKNOWN_TOKEN_INFO;
       const token1Info = tokenInfos[currency1] || UNKNOWN_TOKEN_INFO;
-      const baseAddress =
-        currency0 === WETH_ADDRESS || currency0 === ETH_ADDRESS
-          ? currency1
-          : currency0;
+      const isEthSideCurrency0 =
+        currency0 === ETH_ADDRESS || currency0 === WETH_ADDRESS.toLowerCase();
+      const baseAddress = isEthSideCurrency0 ? currency1 : currency0;
       const baseInfo = tokenInfos[baseAddress] || UNKNOWN_TOKEN_INFO;
-      const userNetBase = transfers
-        .filter((t) => t.token.toLowerCase() === baseAddress)
-        .reduce((sum, t) => {
-          if (t.to.toLowerCase() === userWallet) return sum + t.value;
-          if (t.from.toLowerCase() === userWallet) return sum - t.value;
-          return sum;
-        }, 0n);
-      if (userNetBase === 0n) {
-        console.warn(`No user net for base token in pool ${index}. Skipping.`);
-        index++;
+      let isToken0In: boolean;
+      let eventAmountIn: bigint = 0n;
+      let eventAmountOut: bigint = 0n;
+      // Determine IN/OUT based on the pool deltas
+      if (swap.amount0 > 0n && swap.amount1 < 0n) {
+        // Pool received Token 0, sent Token 1
+        isToken0In = true;
+        eventAmountIn = swap.amount0;
+        eventAmountOut = -swap.amount1;
+      } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
+        // Pool sent Token 0, received Token 1
+        isToken0In = false;
+        eventAmountIn = swap.amount1;
+        eventAmountOut = -swap.amount0;
+      } else {
+        console.warn(`Invalid V4 swap deltas for swap ${v4Index}. Skipping.`);
+        v4Index++;
         continue;
       }
-      const absNet0 = net.netAmount0 < 0n ? -net.netAmount0 : net.netAmount0;
-      const absNet1 = net.netAmount1 < 0n ? -net.netAmount1 : net.netAmount1;
-      const isSmallSideToken0 = absNet0 < absNet1;
-      const ethSideAmount = isSmallSideToken0 ? absNet0 : absNet1;
-      const baseSideAmount = isSmallSideToken0 ? absNet1 : absNet0;
-      const isBuy = userNetBase > 0n;
-      let swapAmountIn: bigint;
-      let swapAmountOut: bigint;
-      let inputTokenAddress: string;
-      let outputTokenAddress: string;
-      let inputInfo: TokenInfo;
-      let outputInfo: TokenInfo;
-      if (isBuy) {
-        swapAmountIn = ethSideAmount;
-        swapAmountOut = userNetBase;
-        inputTokenAddress = WETH_ADDRESS; // or ETH
-        outputTokenAddress = baseAddress;
-        inputInfo = tokenInfos[WETH_ADDRESS] || UNKNOWN_TOKEN_INFO;
-        outputInfo = baseInfo;
-      } else {
-        swapAmountIn = -userNetBase;
-        swapAmountOut = ethSideAmount;
-        inputTokenAddress = baseAddress;
-        outputTokenAddress = WETH_ADDRESS;
-        inputInfo = baseInfo;
-        outputInfo = tokenInfos[WETH_ADDRESS] || UNKNOWN_TOKEN_INFO;
-      }
-      // Debug logs
-      console.log(`\nDebug for pool ${index}:`);
-      console.log(
-        `Net pool deltas: amount0=${ethers.formatUnits(
-          net.netAmount0,
-          token0Info.decimals || 18
-        )} ${token0Info.symbol || "token0"}, amount1=${ethers.formatUnits(
-          net.netAmount1,
-          token1Info.decimals || 18
-        )} ${token1Info.symbol || "token1"}`
-      );
-      console.log(`Pool key: ${currency0} / ${currency1}`);
-      console.log(
-        `User net base: ${ethers.formatUnits(
-          userNetBase,
-          baseInfo.decimals || 18
-        )} ${baseInfo.symbol || baseAddress}`
-      );
-      console.log(`Small side (ETH): ${ethers.formatEther(ethSideAmount)} ETH`);
-      console.log(
-        `Large side (base): ${ethers.formatUnits(
-          baseSideAmount,
-          baseInfo.decimals || 18
-        )} ${baseInfo.symbol || baseAddress}`
-      );
-      console.log(`Detected direction: ${isBuy ? "BUY" : "SELL"}`);
-      console.log(
-        `Final amounts: in=${ethers.formatUnits(
-          swapAmountIn,
-          inputInfo.decimals || 18
-        )} ${inputInfo.symbol || inputTokenAddress}, out=${ethers.formatUnits(
-          swapAmountOut,
-          outputInfo.decimals || 18
-        )} ${outputInfo.symbol || outputTokenAddress}`
-      );
-      if (swapAmountIn === 0n) {
-        console.warn(`Swap amount in is zero for pool ${index}. Skipping.`);
-        index++;
+      const inputTokenAddress = isToken0In ? currency0 : currency1;
+      const outputTokenAddress = isToken0In ? currency1 : currency0;
+      const inputInfo = isToken0In ? token0Info : token1Info;
+      const outputInfo = isToken0In ? token1Info : token0Info;
+      // Determine the user's trade direction (BUY/SELL)
+      // If Base Token is output, it's a BUY. If Base Token is input, it's a SELL.
+      const isBuy = outputTokenAddress === baseAddress;
+      // Use the event amounts as the trade amounts.
+      const swapAmountIn = eventAmountIn;
+      const swapAmountOut = eventAmountOut;
+      if (swapAmountIn === 0n || swapAmountOut === 0n) {
+        console.warn(`V4 swap amounts are zero for swap ${v4Index}. Skipping.`);
+        v4Index++;
         continue;
       }
       const amountInDecimal = ethers.formatUnits(
@@ -452,75 +455,365 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         swapAmountOut,
         outputInfo.decimals
       );
+      // Determine ETH-side and Base-side for price calculation
+      let ethSideAmount: bigint;
+      let baseSideAmount: bigint;
+      let baseSideInfo: TokenInfo;
+      const isInputEthSide =
+        inputTokenAddress === ETH_ADDRESS ||
+        inputTokenAddress === WETH_ADDRESS.toLowerCase();
+      if (isInputEthSide) {
+        ethSideAmount = swapAmountIn;
+        baseSideAmount = swapAmountOut;
+        baseSideInfo = outputInfo;
+      } else {
+        ethSideAmount = swapAmountOut;
+        baseSideAmount = swapAmountIn;
+        baseSideInfo = inputInfo;
+      }
       const ethDeltaDecimal = ethers.formatUnits(ethSideAmount, 18);
       const baseDeltaDecimal = ethers.formatUnits(
         baseSideAmount,
-        baseInfo.decimals
+        baseSideInfo.decimals
       );
+      // --- Price Calculation (Updated for robustness and clarity) ---
+      // 1. Effective Price (calculated directly from trade amounts)
       const effectiveEthPerBaseNum =
         parseFloat(ethDeltaDecimal) / parseFloat(baseDeltaDecimal) || 0;
-      const effectiveEthPerBase = effectiveEthPerBaseNum.toFixed(10);
-      // BigInt spot price calculation
+      const effectiveBasePerEthNum =
+        effectiveEthPerBaseNum > 0 ? 1 / effectiveEthPerBaseNum : 0;
+      // 2. Spot Price (calculated from sqrtPriceX96 log)
       let spotEthPerBaseNum = 0;
-      if (net.sqrtPriceX96 && net.sqrtPriceX96 !== 0n) {
-        const Q96 = 2n ** 96n;
-        const sqrtPrice = net.sqrtPriceX96;
-        const priceNum = (sqrtPrice * sqrtPrice) / (Q96 * Q96);
-        const decDiff = BigInt(
-          (token0Info.decimals || 18) - (token1Info.decimals || 18)
-        );
-        let adjustedPrice = priceNum * 10n ** decDiff;
-        // Override isEthSideToken0 based on small side
-        const overrideIsEthSideToken0 = isSmallSideToken0;
-        const adjustedPriceStr = adjustedPrice.toString();
-        const adjustedPriceNum = parseFloat(adjustedPriceStr);
-        spotEthPerBaseNum = overrideIsEthSideToken0
-          ? 1 / adjustedPriceNum
-          : adjustedPriceNum;
+      if (swap.sqrtPriceX96 && swap.sqrtPriceX96 !== 0n) {
+        const Q96 = Math.pow(2, 96);
+        const sqrtPriceNum = Number(swap.sqrtPriceX96) / Q96;
+        // Price of token1 expressed in terms of token0 (P_{1/0})
+        const price1Per0 = sqrtPriceNum * sqrtPriceNum;
+        // Account for decimals
+        // price1Per0 is in units of token0 per token1.
+        // Assuming currency0 is token0 and currency1 is token1
+        let token0PerToken1 = price1Per0;
+        if (token0Info.decimals !== token1Info.decimals) {
+          const diff = token1Info.decimals - token0Info.decimals;
+          token0PerToken1 = token0PerToken1 * Math.pow(10, diff);
+        }
+        let isEthSideCurrency0Spot = isEthSideCurrency0;
+        let ethPerBaseSpot: number;
+        let basePerEthSpot: number;
+        if (isEthSideCurrency0Spot) {
+          // currency0 is ETH, currency1 is BASE
+          // price1Per0 is BASE per ETH (P_BASE/ETH)
+          basePerEthSpot = token0PerToken1;
+          ethPerBaseSpot = basePerEthSpot > 0 ? 1 / basePerEthSpot : 0;
+        } else {
+          // currency1 is ETH, currency0 is BASE
+          // price1Per0 is ETH per BASE (P_ETH/BASE)
+          ethPerBaseSpot = token0PerToken1;
+          basePerEthSpot = ethPerBaseSpot > 0 ? 1 / ethPerBaseSpot : 0;
+        }
+        spotEthPerBaseNum = ethPerBaseSpot;
       }
-      const spotEthPerBase = spotEthPerBaseNum.toFixed(10);
-      const usdPerBase = ethUsd * spotEthPerBaseNum;
-      const usdPriceStr = `$${usdPerBase.toFixed(4)}`;
-      const inputPrice = isBuy ? ethUsd : usdPerBase;
+
+      const spotBasePerEthNum =
+        spotEthPerBaseNum > 0 ? 1 / spotEthPerBaseNum : 0;
+
+      // --- Price Inversion Logic for Display ---
+      const NATIVE_PRICE_THRESHOLD = 1000;
+      let isPriceInverted = false;
+      let finalNativePriceStr: string;
+      let finalSpotPriceStr: string;
+      let finalPriceLabel: string;
+      let finalUsdPrice: number;
+      let usdPriceLabel: string;
+
+      if (effectiveEthPerBaseNum > NATIVE_PRICE_THRESHOLD) {
+        // Price of 1 BASE is extremely high (e.g., > 1000 ETH), so display the inverse (BASE per ETH)
+        isPriceInverted = true;
+        finalNativePriceStr = effectiveBasePerEthNum.toPrecision(10); // P_BASE/ETH (Effective)
+        finalSpotPriceStr = spotBasePerEthNum.toPrecision(10); // P_BASE/ETH (Spot)
+
+        finalPriceLabel = `${baseInfo.symbol} per ETH`;
+
+        // FIX: Override USD Price Calculation to use the user's desired formula:
+        // P_USD = P_USD/ETH * P_NATIVE (where P_NATIVE is the small displayed price P_BASE/ETH)
+        // This gives the USD per BASE price expected for a low-value token.
+        finalUsdPrice = spotBasePerEthNum * ethUsd;
+        usdPriceLabel = `USD per ${baseInfo.symbol}`;
+      } else {
+        // Standard case: display ETH per BASE
+        isPriceInverted = false;
+        finalNativePriceStr = effectiveEthPerBaseNum.toPrecision(10); // P_ETH/BASE (Effective)
+        finalSpotPriceStr = spotEthPerBaseNum.toPrecision(10); // P_ETH/BASE (Spot)
+        finalPriceLabel = `ETH per ${baseInfo.symbol}`;
+        usdPriceLabel = `USD per ${baseInfo.symbol}`;
+        // The USD price of the Base Token (BASE)
+        finalUsdPrice = spotEthPerBaseNum * ethUsd; // USD per BASE
+      }
+
+      // Update final USD price string format
+      const finalUsdPriceStr = `$${finalUsdPrice.toFixed(4)}`; // Use 4 decimal places for small USD prices
+
+      // Calculate trade value and volume
+      const usdPerBase = spotEthPerBaseNum * ethUsd;
+      const inputPrice = isInputEthSide ? ethUsd : usdPerBase;
       const tradeUsdValue = parseFloat(amountInDecimal) * inputPrice;
-      const usdVolumeNum = tradeUsdValue;
-      const usdVolumeStr = `$${usdVolumeNum.toFixed(2)}`;
-      console.log(`\n--- Formatted V4 Swap ${index} ---`);
-      console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
+      const volumeUsdStr = `$${tradeUsdValue.toFixed(2)}`;
+      const tradeUsdValueStr = `$${tradeUsdValue.toFixed(2)}`;
+
+      // Console Log Output
       console.log(
-        `Input: ${formatAmount(
-          swapAmountIn,
-          inputInfo.decimals,
-          inputInfo.symbol
-        )}`
+        `\n--- Formatted V4 Swap ${v4Index} (${isBuy ? "BUY" : "SELL"}) ---`
       );
       console.log(
-        `Output: ${formatAmount(
-          swapAmountOut,
-          outputInfo.decimals,
-          outputInfo.symbol
-        )}`
+        `Pair: ${inputInfo.symbol}/${outputInfo.symbol}\nInput: ${amountInDecimal} ${inputInfo.symbol}\nOutput: ${amountOutDecimal} ${outputInfo.symbol}`
       );
+      console.log(`Effective Price: ${finalNativePriceStr} ${finalPriceLabel}`);
       console.log(
-        `Effective Price: ${effectiveEthPerBase} ETH per ${baseInfo.symbol}`
+        `Spot Price: ${finalSpotPriceStr} ${finalPriceLabel} | ${usdPriceLabel}: ${finalUsdPriceStr} | Trade Value: ${tradeUsdValueStr} | Volume USD: ${volumeUsdStr}`
       );
-      console.log(
-        `Spot Price: ${spotEthPerBase} ETH per ${baseInfo.symbol} | USD per ${
-          baseInfo.symbol
-        }: ${usdPriceStr} | Trade Value: $${tradeUsdValue.toFixed(
-          2
-        )} | Volume USD: ${usdVolumeStr}`
-      );
-      const isNativeInput =
-        inputTokenAddress === ETH_ADDRESS || inputTokenAddress === WETH_ADDRESS;
+
+      // Final Trade Event JSON
       tradeEvents.push({
-        event: `Swap${index}`,
+        event: `V4-Swap${v4Index}`,
         status: "Success ✅",
-        txHash,
-        timestamp,
-        usdPrice: usdPriceStr,
-        nativePrice: effectiveEthPerBase,
-        volume: usdVolumeStr,
+        txHash: txHash,
+        timestamp: timestamp,
+        usdPrice: finalUsdPriceStr,
+        nativePrice: finalNativePriceStr,
+        volume: tradeUsdValueStr,
+        inputVolume: amountInDecimal,
+        mint: baseAddress,
+        type: isBuy ? "BUY" : "SELL",
+        pairAddress: swap.pool,
+        programId: contractAddress,
+        quoteToken: ETH_ADDRESS,
+        baseDecimals: baseInfo.decimals,
+        quoteDecimals: 18,
+        tradeType: `${inputInfo.symbol} -> ${outputInfo.symbol}`,
+        walletAddress: userWallet,
+        protocol: "V4",
+        targetTokenMint: "",
+      });
+      v4Index++;
+    }
+    // --- END: V4 Trade Event Processing ---
+
+    // Process V3 Swaps
+    let v3Index = 1;
+    for (const log of receipt.logs) {
+      const topic0 = log.topics[0]?.toLowerCase();
+      if (topic0 === V3_SWAP_EVENT_TOPIC?.toLowerCase()) {
+        try {
+          const parsedLog = v3SwapIface.parseLog(log);
+          if (parsedLog) {
+            const { amount0, amount1 } = parsedLog.args;
+            if (amount0 === 0n && amount1 === 0n) continue;
+            const poolAddress = log.address.toLowerCase();
+            v3Swaps.push({
+              pool: poolAddress,
+              sender: parsedLog.args.sender.toLowerCase(),
+              recipient: parsedLog.args.recipient.toLowerCase() || userWallet,
+              amount0,
+              amount1,
+              protocol: "V3",
+              tick: Number(parsedLog.args.tick),
+              sqrtPriceX96: parsedLog.args.sqrtPriceX96,
+              liquidity: 0n, // Not available in V3 Swap event
+            });
+            v3PoolIds.add(poolAddress);
+          }
+        } catch (e) {
+          console.warn(
+            `Failed to parse V3 Swap event for log ${log.index}: ${
+              (e as Error).message
+            }`
+          );
+        }
+      }
+    }
+    for (const swap of v3Swaps) {
+      const poolId = swap.pool;
+      const poolKey = poolKeysV3[poolId];
+      if (!poolKey) {
+        console.warn(`No V3 poolKey for swap ${v3Index}. Skipping.`);
+        v3Index++;
+        continue;
+      }
+      const { currency0, currency1 } = poolKey;
+      const token0Info = tokenInfos[currency0] || UNKNOWN_TOKEN_INFO;
+      const token1Info = tokenInfos[currency1] || UNKNOWN_TOKEN_INFO;
+      const isEthSideCurrency0 =
+        currency0 === ETH_ADDRESS || currency0 === WETH_ADDRESS.toLowerCase();
+      const baseAddress = isEthSideCurrency0 ? currency1 : currency0;
+      const baseInfo = tokenInfos[baseAddress] || UNKNOWN_TOKEN_INFO;
+      let isToken0In: boolean;
+      let eventAmountIn: bigint = 0n;
+      let eventAmountOut: bigint = 0n;
+      // Determine IN/OUT based on the pool deltas
+      if (swap.amount0 > 0n && swap.amount1 < 0n) {
+        // Pool received Token 0, sent Token 1
+        isToken0In = true;
+        eventAmountIn = swap.amount0;
+        eventAmountOut = -swap.amount1;
+      } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
+        // Pool sent Token 0, received Token 1
+        isToken0In = false;
+        eventAmountIn = swap.amount1;
+        eventAmountOut = -swap.amount0;
+      } else {
+        console.warn(`Invalid V3 swap deltas for swap ${v3Index}. Skipping.`);
+        v3Index++;
+        continue;
+      }
+      const inputTokenAddress = isToken0In ? currency0 : currency1;
+      const outputTokenAddress = isToken0In ? currency1 : currency0;
+      const inputInfo = isToken0In ? token0Info : token1Info;
+      const outputInfo = isToken0In ? token1Info : token0Info;
+      // Determine the user's trade direction (BUY/SELL)
+      // If Base Token is output, it's a BUY. If Base Token is input, it's a SELL.
+      const isBuy = outputTokenAddress === baseAddress;
+      // Use the event amounts as the trade amounts.
+      const swapAmountIn = eventAmountIn;
+      const swapAmountOut = eventAmountOut;
+      if (swapAmountIn === 0n || swapAmountOut === 0n) {
+        console.warn(`V3 swap amounts are zero for swap ${v3Index}. Skipping.`);
+        v3Index++;
+        continue;
+      }
+      const amountInDecimal = ethers.formatUnits(
+        swapAmountIn,
+        inputInfo.decimals
+      );
+      const amountOutDecimal = ethers.formatUnits(
+        swapAmountOut,
+        outputInfo.decimals
+      );
+      // Determine ETH-side and Base-side for price calculation
+      let ethSideAmount: bigint;
+      let baseSideAmount: bigint;
+      let baseSideInfo: TokenInfo;
+      const isInputEthSide =
+        inputTokenAddress === ETH_ADDRESS ||
+        inputTokenAddress === WETH_ADDRESS.toLowerCase();
+      if (isInputEthSide) {
+        ethSideAmount = swapAmountIn;
+        baseSideAmount = swapAmountOut;
+        baseSideInfo = outputInfo;
+      } else {
+        ethSideAmount = swapAmountOut;
+        baseSideAmount = swapAmountIn;
+        baseSideInfo = inputInfo;
+      }
+      const ethDeltaDecimal = ethers.formatUnits(ethSideAmount, 18);
+      const baseDeltaDecimal = ethers.formatUnits(
+        baseSideAmount,
+        baseSideInfo.decimals
+      );
+      // --- Price Calculation (Updated for robustness and clarity) ---
+      // 1. Effective Price (calculated directly from trade amounts)
+      const effectiveEthPerBaseNum =
+        parseFloat(ethDeltaDecimal) / parseFloat(baseDeltaDecimal) || 0;
+      const effectiveBasePerEthNum =
+        effectiveEthPerBaseNum > 0 ? 1 / effectiveEthPerBaseNum : 0;
+      // 2. Spot Price (calculated from sqrtPriceX96 log)
+      let spotEthPerBaseNum = 0;
+      if (swap.sqrtPriceX96 && swap.sqrtPriceX96 !== 0n) {
+        const Q96 = Math.pow(2, 96);
+        const sqrtPriceNum = Number(swap.sqrtPriceX96) / Q96;
+        // Price of token1 expressed in terms of token0 (P_{1/0})
+        const price1Per0 = sqrtPriceNum * sqrtPriceNum;
+        // Account for decimals
+        // price1Per0 is in units of token0 per token1.
+        // Assuming currency0 is token0 and currency1 is token1
+        let token0PerToken1 = price1Per0;
+        if (token0Info.decimals !== token1Info.decimals) {
+          const diff = token1Info.decimals - token0Info.decimals;
+          token0PerToken1 = token0PerToken1 * Math.pow(10, diff);
+        }
+        let isEthSideCurrency0Spot = isEthSideCurrency0;
+        let ethPerBaseSpot: number;
+        let basePerEthSpot: number;
+        if (isEthSideCurrency0Spot) {
+          // currency0 is ETH, currency1 is BASE
+          // price1Per0 is BASE per ETH (P_BASE/ETH)
+          basePerEthSpot = token0PerToken1;
+          ethPerBaseSpot = basePerEthSpot > 0 ? 1 / basePerEthSpot : 0;
+        } else {
+          // currency1 is ETH, currency0 is BASE
+          // price1Per0 is ETH per BASE (P_ETH/BASE)
+          ethPerBaseSpot = token0PerToken1;
+          basePerEthSpot = ethPerBaseSpot > 0 ? 1 / ethPerBaseSpot : 0;
+        }
+        spotEthPerBaseNum = ethPerBaseSpot;
+      }
+
+      const spotBasePerEthNum =
+        spotEthPerBaseNum > 0 ? 1 / spotEthPerBaseNum : 0;
+
+      // --- Price Inversion Logic for Display (V3) ---
+      const NATIVE_PRICE_THRESHOLD = 1000;
+      let isPriceInverted = false;
+      let finalNativePriceStr: string;
+      let finalSpotPriceStr: string;
+      let finalPriceLabel: string;
+      let finalUsdPrice: number;
+      let usdPriceLabel: string;
+
+      if (effectiveEthPerBaseNum > NATIVE_PRICE_THRESHOLD) {
+        // Price of 1 BASE is extremely high (e.g., > 1000 ETH), so display the inverse (BASE per ETH)
+        isPriceInverted = true;
+        finalNativePriceStr = effectiveBasePerEthNum.toPrecision(10); // P_BASE/ETH (Effective)
+        finalSpotPriceStr = spotBasePerEthNum.toPrecision(10); // P_BASE/ETH (Spot)
+
+        finalPriceLabel = `${baseInfo.symbol} per ETH`;
+
+        // FIX: Override USD Price Calculation to use the user's desired formula:
+        finalUsdPrice = spotBasePerEthNum * ethUsd;
+        usdPriceLabel = `USD per ${baseInfo.symbol}`;
+      } else {
+        // Standard case: display ETH per BASE
+        isPriceInverted = false;
+        finalNativePriceStr = effectiveEthPerBaseNum.toPrecision(10); // P_ETH/BASE (Effective)
+        finalSpotPriceStr = spotEthPerBaseNum.toPrecision(10); // P_ETH/BASE (Spot)
+        finalPriceLabel = `ETH per ${baseInfo.symbol}`;
+        usdPriceLabel = `USD per ${baseInfo.symbol}`;
+        // The USD price of the Base Token (BASE)
+        finalUsdPrice = spotEthPerBaseNum * ethUsd; // USD per BASE
+      }
+
+      // Update final USD price string format
+      const finalUsdPriceStr = `$${finalUsdPrice.toFixed(4)}`; // Use 4 decimal places for small USD prices
+
+      // Calculate trade value and volume
+      const usdPerBase = spotEthPerBaseNum * ethUsd;
+      const inputPrice = isInputEthSide ? ethUsd : usdPerBase;
+      const tradeUsdValue = parseFloat(amountInDecimal) * inputPrice;
+      const volumeUsdStr = `$${tradeUsdValue.toFixed(2)}`;
+      const tradeUsdValueStr = `$${tradeUsdValue.toFixed(2)}`;
+
+      // Console Log Output
+      console.log(
+        `\n--- Formatted V3 Swap ${v3Index} (${isBuy ? "BUY" : "SELL"}) ---`
+      );
+      console.log(
+        `Pair: ${inputInfo.symbol}/${outputInfo.symbol}\nInput: ${amountInDecimal} ${inputInfo.symbol}\nOutput: ${amountOutDecimal} ${outputInfo.symbol}`
+      );
+      console.log(`Effective Price: ${finalNativePriceStr} ${finalPriceLabel}`);
+      console.log(
+        `Spot Price: ${finalSpotPriceStr} ${finalPriceLabel} | ${usdPriceLabel}: ${finalUsdPriceStr} | Trade Value: ${tradeUsdValueStr} | Volume USD: ${volumeUsdStr}`
+      );
+
+      const isNativeInput =
+        inputTokenAddress === ETH_ADDRESS ||
+        inputTokenAddress === WETH_ADDRESS.toLowerCase();
+      tradeEvents.push({
+        event: `V3-Swap${v3Index}`,
+        status: "Success ✅",
+        txHash: txHash,
+        timestamp: timestamp,
+        usdPrice: finalUsdPriceStr,
+        nativePrice: finalNativePriceStr,
+        volume: tradeUsdValueStr,
         inputVolume: amountInDecimal,
         mint: baseAddress,
         type: isBuy ? "BUY" : "SELL",
@@ -533,15 +826,17 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           ? `ETH -> ${outputInfo.symbol}`
           : `${inputInfo.symbol} -> ETH`,
         walletAddress: userWallet,
-        protocol: "V4",
+        protocol: "V3",
         targetTokenMint: "",
       });
-      index++;
+      v3Index++;
     }
     if (tradeEvents.length > 0) {
-      tradeEvents.forEach((event, i) => {
+      tradeEvents.forEach((event, index) => {
         console.log(
-          `\n${"=".repeat(30)}\nFINAL TRADE EVENT ${i + 1}\n${"=".repeat(30)}`
+          `\n${"=".repeat(30)}\nFINAL TRADE EVENT ${index + 1}\n${"=".repeat(
+            30
+          )}`
         );
         console.log(
           JSON.stringify(
@@ -553,11 +848,11 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         );
       });
     } else {
-      console.log("\n⚠️ No valid V4 TradeEvents constructed.");
+      console.log("\n⚠️ No valid TradeEvents constructed.");
     }
   } catch (err) {
     console.error(
-      `Error analyzing V4 transaction ${txHash}: ${(err as Error).message}`
+      `Error analyzing transaction ${txHash}: ${(err as Error).message}`
     );
   }
 }
@@ -567,17 +862,18 @@ export function collectSwapCalls(
   swapSelector: string
 ): any[] {
   const swaps: any[] = [];
-  function recurse(call: any) {
+  if (!trace) return swaps;
+  const calls: any[] = Array.isArray(trace) ? trace : [trace];
+  for (const call of calls) {
     if (
       call.to?.toLowerCase() === poolManager.toLowerCase() &&
-      call.input?.startsWith(swapSelector)
+      call.input?.toLowerCase().startsWith(swapSelector.toLowerCase())
     ) {
       swaps.push(call);
     }
     if (call.calls) {
-      call.calls.forEach(recurse);
+      swaps.push(...collectSwapCalls(call.calls, poolManager, swapSelector));
     }
   }
-  recurse(trace);
   return swaps;
 }
