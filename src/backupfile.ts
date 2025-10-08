@@ -11,12 +11,14 @@ import {
 import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "./types/types";
 import { getTokenInfo, formatAmount, fetchEthPriceUsd } from "./utils/utils";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
+
 const V4_INITIALIZE_EVENT_TOPIC =
   "0x5d5d851e58a74e64f849a2636f29e1f579979965d1b32d56a7c390500e281561";
 const initializeIface = new ethers.Interface(
   uniswapV4PoolManagerAbi.filter((item: any) => item.name === "Initialize")
 );
 const ETH_ADDRESS = "0x0000000000000000000000000000000000000000";
+
 export async function analyzeV4Transaction(txHash: string): Promise<void> {
   try {
     const receipt = await provider.getTransactionReceipt(txHash);
@@ -26,10 +28,12 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     }
     const transaction = await provider.getTransaction(txHash);
     if (!transaction) throw new Error(`Transaction not found: ${txHash}`);
+
     const block = await provider.getBlock(receipt.blockNumber);
     const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
     const userWallet = transaction.from.toLowerCase();
     const contractAddress = transaction.to?.toLowerCase() || "0x";
+
     console.log(`\n--- Analyzing V4 Transaction: ${txHash} ---`);
     console.log(
       `Status: Success ✅ | From: ${transaction.from} | To: ${transaction.to}`
@@ -42,6 +46,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     console.log(
       `Fee: ${ethers.formatEther(receipt.gasUsed * receipt.gasPrice)} ETH`
     );
+
     const iface = new ethers.Interface(uniswapV4PoolManagerAbi);
     const swapSelector = iface.getFunction("swap")!.selector;
     const swaps: SwapEvent[] = [];
@@ -50,9 +55,11 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     const poolKeys: {
       [poolId: string]: { currency0: string; currency1: string };
     } = {};
+
     const transfers: Transfer[] = [];
     const transferTopicHash =
       "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
     for (const log of receipt.logs) {
       if (log.topics[0]?.toLowerCase() === transferTopicHash) {
         try {
@@ -69,6 +76,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         } catch {}
       }
     }
+
     try {
       const parsed = iface.parseTransaction({ data: transaction.data });
       if (parsed?.name === "swap") {
@@ -90,26 +98,25 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     } catch {
       console.warn(`Failed to parse direct swap call.`);
     }
-    const poolManagerAddress = UNISWAP_V4_POOL_MANAGER_ADDRESS.toLowerCase();
+
     for (const log of receipt.logs) {
       const topic0 = log.topics[0]?.toLowerCase();
       const logAddrLower = log.address.toLowerCase();
+
       if (
-        logAddrLower === poolManagerAddress &&
+        logAddrLower === UNISWAP_V4_POOL_MANAGER_ADDRESS.toLowerCase() &&
         topic0 === V4_SWAP_EVENT_TOPIC.toLowerCase()
       ) {
         try {
           const parsedLog = v4SwapIface.parseLog(log);
           if (parsedLog) {
-            const { amount0, amount1 } = parsedLog.args;
-            if (amount0 === 0n && amount1 === 0n) continue;
             const poolId = parsedLog.args.id.toLowerCase();
             swaps.push({
               pool: poolId,
               sender: parsedLog.args.sender.toLowerCase(),
               recipient: userWallet,
-              amount0,
-              amount1,
+              amount0: parsedLog.args.amount0,
+              amount1: parsedLog.args.amount1,
               protocol: "V4",
               tick: Number(parsedLog.args.tick),
               sqrtPriceX96: parsedLog.args.sqrtPriceX96,
@@ -126,11 +133,14 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         }
       }
     }
+
     if (swaps.length === 0) {
       console.log("No V4 Swap events found.");
       return;
     }
-    // Infer Pool Keys from Initialize Event
+
+    // FIX 1: Infer Pool Keys from Initialize Event
+    const poolManagerAddress = UNISWAP_V4_POOL_MANAGER_ADDRESS.toLowerCase();
     for (const log of receipt.logs) {
       const topic0 = log.topics[0]?.toLowerCase();
       const logAddrLower = log.address.toLowerCase();
@@ -156,158 +166,57 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         }
       }
     }
-    // Build valueToTokens map for transfer matching
-    const valueToTokens: { [valueStr: string]: string[] } = {};
-    for (const t of transfers) {
-      const valStr = t.value.toString();
-      if (!valueToTokens[valStr]) {
-        valueToTokens[valStr] = [];
-      }
-      if (!valueToTokens[valStr].includes(t.token)) {
-        valueToTokens[valStr].push(t.token);
-      }
-    }
-    // Enhanced Transfer Matching using value matches (user-agnostic for inference)
-    const hasEthInput = transaction.value > 0n;
-    for (const swap of swaps) {
-      const poolId = swap.pool;
-      if (poolKeys[poolId]) continue;
-      let inAmount: bigint;
-      let outAmount: bigint;
-      let inputSideIsZero: boolean;
-      if (swap.amount0 > 0n && swap.amount1 < 0n) {
-        inAmount = swap.amount0;
-        outAmount = -swap.amount1;
-        inputSideIsZero = true;
-      } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
-        inAmount = swap.amount1;
-        outAmount = -swap.amount0;
-        inputSideIsZero = false;
-      } else {
-        console.warn(
-          `Invalid swap deltas for pool ${poolId}. Skipping inference.`
-        );
-        continue;
-      }
-      let inputToken: string | null = null;
-      const inValStr = inAmount.toString();
-      if (valueToTokens[inValStr]) {
-        const cands = valueToTokens[inValStr].filter(
-          (t) => t !== WETH_ADDRESS.toLowerCase()
-        );
-        inputToken = cands.length > 0 ? cands[0] : valueToTokens[inValStr][0];
-      }
-      let outputToken: string | null = null;
-      const outValStr = outAmount.toString();
-      if (valueToTokens[outValStr]) {
-        const cands = valueToTokens[outValStr].filter(
-          (t) => t !== WETH_ADDRESS.toLowerCase()
-        );
-        outputToken = cands.length > 0 ? cands[0] : valueToTokens[outValStr][0];
-      }
-      let currencies: string[] = [];
-      if (inputToken && outputToken && inputToken !== outputToken) {
-        currencies = [inputToken, outputToken].sort();
-      } else if (inputToken && inputToken !== WETH_ADDRESS.toLowerCase()) {
-        currencies = [inputToken, WETH_ADDRESS].sort();
-      } else if (outputToken && outputToken !== WETH_ADDRESS.toLowerCase()) {
-        currencies = [outputToken, WETH_ADDRESS].sort();
-      }
-      if (currencies.length === 2) {
-        poolKeys[poolId] = {
-          currency0: currencies[0],
-          currency1: currencies[1],
-        };
-        tokenAddresses.add(currencies[0]);
-        tokenAddresses.add(currencies[1]);
-        console.log(
-          `Inferred poolKey from transfer values for ${poolId}: ${currencies[0]}/${currencies[1]}`
-        );
-      }
-    }
-    // Enhanced Fallback: Per-pool, filter tokens by matching delta values from swaps in that pool
-    const poolToSwaps: { [poolId: string]: SwapEvent[] } = {};
-    for (const swap of swaps) {
-      if (!poolToSwaps[swap.pool]) {
-        poolToSwaps[swap.pool] = [];
-      }
-      poolToSwaps[swap.pool].push(swap);
-    }
+
+    // FIX 2: Enhanced Fallback Inference Logic with WETH->ETH heuristic
     for (const poolId of poolIds) {
-      if (poolKeys[poolId]) {
-        const key = poolKeys[poolId];
-        if (key.currency0 === key.currency1) {
-          delete poolKeys[poolId]; // Invalidate same-token keys
-        } else {
-          continue;
-        }
-      }
-      if (!poolToSwaps[poolId]) continue;
-      const relevantValues = new Set<string>();
-      for (const swap of poolToSwaps[poolId]) {
-        relevantValues.add(swap.amount0.toString().replace("-", "")); // absolute
-        relevantValues.add(swap.amount1.toString().replace("-", ""));
-      }
-      const matchedTokens = new Set<string>();
-      for (const valStr of relevantValues) {
-        if (valueToTokens[valStr]) {
-          for (const tok of valueToTokens[valStr]) {
-            matchedTokens.add(tok);
-          }
-        }
-      }
-      let currency0: string, currency1: string;
-      const matchedArray = Array.from(matchedTokens);
-      if (matchedArray.length === 0 && hasEthInput) {
-        console.warn(`No matched tokens for ${poolId}. Skipping.`);
-        continue;
-      } else if (matchedArray.length === 1) {
-        const tokenA = matchedArray[0];
-        if (tokenA === WETH_ADDRESS.toLowerCase()) {
-          console.warn(`Only WETH matched for ${poolId}. Skipping.`);
-          continue;
-        }
-        const pair = [tokenA, WETH_ADDRESS].sort();
-        currency0 = pair[0];
-        currency1 = pair[1];
-        console.warn(
-          `Inferred poolKey (HEURISTIC: 1 matched + WETH) for ${poolId}: ${currency0}/${currency1}`
-        );
-      } else if (matchedArray.length === 2) {
-        [currency0, currency1] = matchedArray.sort();
-      } else if (matchedArray.length > 2) {
-        console.warn(`Too many matched tokens for ${poolId}. Skipping.`);
-        continue;
-      } else {
-        // Fallback to general heuristic if no matches
+      if (!poolKeys[poolId]) {
+        const hasEthInput = transaction.value > 0n;
         const potentialTokensSet = new Set(
           receipt.logs
             .filter((l) => l.topics[0]?.toLowerCase() === transferTopicHash)
             .map((l) => l.address.toLowerCase())
         );
-        const adjustedPotentialTokens = Array.from(potentialTokensSet).filter(
-          (t) => t !== WETH_ADDRESS.toLowerCase()
-        );
-        if (adjustedPotentialTokens.length === 1) {
+        const wethLower = WETH_ADDRESS.toLowerCase();
+        if (potentialTokensSet.has(wethLower)) {
+          potentialTokensSet.delete(wethLower);
+          potentialTokensSet.add(ETH_ADDRESS);
+        }
+        const adjustedPotentialTokens = Array.from(potentialTokensSet);
+        let currency0, currency1;
+        if (adjustedPotentialTokens.length === 1 && hasEthInput) {
           const tokenA = adjustedPotentialTokens[0];
-          const pair = [tokenA, WETH_ADDRESS].sort();
+          currency0 = ETH_ADDRESS;
+          currency1 = tokenA;
+        } else if (adjustedPotentialTokens.length === 2) {
+          [currency0, currency1] = adjustedPotentialTokens.sort();
+        } else if (adjustedPotentialTokens.length === 1 && !hasEthInput) {
+          const tokenA = adjustedPotentialTokens[0];
+          if (tokenA === ETH_ADDRESS) {
+            console.warn(`Pure ETH pool inferred for ${poolId}. Skipping.`);
+            continue;
+          }
+          const wethForHeuristic = WETH_ADDRESS.toLowerCase();
+          const pair = [tokenA, wethForHeuristic].sort();
           currency0 = pair[0];
           currency1 = pair[1];
           console.warn(
-            `Inferred poolKey (GENERAL HEURISTIC) for ${poolId}: ${currency0}/${currency1}`
+            `Inferred poolKey (HEURISTIC: 1 ERC20 + WETH) for ${poolId}: ${currency0}/${currency1}`
           );
         } else {
           console.warn(`Cannot infer poolKey for ${poolId}. Skipping pool.`);
           continue;
         }
+        poolKeys[poolId] = { currency0, currency1 };
+        tokenAddresses.add(currency0);
+        tokenAddresses.add(currency1);
       }
-      poolKeys[poolId] = { currency0, currency1 };
-      tokenAddresses.add(currency0);
-      tokenAddresses.add(currency1);
     }
+
+    const hasEthInput = transaction.value > 0n;
     if (hasEthInput) {
       tokenAddresses.add(ETH_ADDRESS);
     }
+
     const tokenInfos: { [address: string]: TokenInfo } = {};
     tokenInfos[ETH_ADDRESS] = {
       symbol: "ETH",
@@ -315,121 +224,127 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       decimals: 18,
       address: ETH_ADDRESS,
     } as TokenInfo;
+
     await Promise.all(
       Array.from(tokenAddresses)
         .filter((t) => t !== ETH_ADDRESS)
         .map((t) => getTokenInfo(t).then((info) => (tokenInfos[t] = info)))
     );
+
     const ethUsd = (await fetchEthPriceUsd()) || 0;
-    // Aggregate swaps per pool
-    const poolNets: {
-      [poolId: string]: {
-        netAmount0: bigint;
-        netAmount1: bigint;
-        sqrtPriceX96: bigint;
-        tick: number;
-      };
-    } = {};
-    for (const poolId in poolToSwaps) {
-      let net0 = 0n;
-      let net1 = 0n;
-      let lastSqrt = 0n;
-      let lastTick = 0;
-      for (const s of poolToSwaps[poolId]) {
-        net0 += s.amount0;
-        net1 += s.amount1;
-        lastSqrt = s.sqrtPriceX96 || 0n;
-        lastTick = s.tick || 0;
-      }
-      poolNets[poolId] = {
-        netAmount0: net0,
-        netAmount1: net1,
-        sqrtPriceX96: lastSqrt,
-        tick: lastTick,
-      };
-    }
     const tradeEvents: TradeEvent[] = [];
-    let index = 1;
-    for (const [poolId, net] of Object.entries(poolNets)) {
-      const poolKey = poolKeys[poolId];
+
+    for (const [index, swap] of swaps.entries()) {
+      const poolKey = poolKeys[swap.pool];
       if (!poolKey) {
-        console.warn(`No poolKey for pool ${index}. Skipping.`);
-        index++;
+        console.warn(`No poolKey for swap ${index + 1}. Skipping.`);
         continue;
       }
+
       const { currency0, currency1 } = poolKey;
       const token0Info = tokenInfos[currency0] || UNKNOWN_TOKEN_INFO;
       const token1Info = tokenInfos[currency1] || UNKNOWN_TOKEN_INFO;
-      const baseAddress =
-        currency0 === WETH_ADDRESS || currency0 === ETH_ADDRESS
-          ? currency1
-          : currency0;
+
+      const isEthSideCurrency0 =
+        currency0 === ETH_ADDRESS || currency0 === WETH_ADDRESS;
+      const baseAddress = isEthSideCurrency0 ? currency1 : currency0;
       const baseInfo = tokenInfos[baseAddress] || UNKNOWN_TOKEN_INFO;
-      const userNetBase = transfers
-        .filter((t) => t.token.toLowerCase() === baseAddress)
-        .reduce((sum, t) => {
-          if (t.to.toLowerCase() === userWallet) return sum + t.value;
-          if (t.from.toLowerCase() === userWallet) return sum - t.value;
-          return sum;
-        }, 0n);
-      if (userNetBase === 0n) {
-        console.warn(`No user net for base token in pool ${index}. Skipping.`);
-        index++;
+
+      let isToken0In: boolean;
+      let eventAmountIn: bigint = 0n;
+      let eventAmountOut: bigint = 0n;
+
+      // Corrected direction detection based on pool delta signs
+      if (swap.amount0 > 0n && swap.amount1 < 0n) {
+        // Input token0, output token1
+        isToken0In = true;
+        eventAmountIn = swap.amount0;
+        eventAmountOut = -swap.amount1;
+      } else if (swap.amount0 < 0n && swap.amount1 > 0n) {
+        // Input token1, output token0
+        isToken0In = false;
+        eventAmountIn = swap.amount1;
+        eventAmountOut = -swap.amount0;
+      } else {
+        console.warn(`Invalid swap deltas for swap ${index + 1}. Skipping.`);
         continue;
       }
-      const absNet0 = net.netAmount0 < 0n ? -net.netAmount0 : net.netAmount0;
-      const absNet1 = net.netAmount1 < 0n ? -net.netAmount1 : net.netAmount1;
-      const isSmallSideToken0 = absNet0 < absNet1;
-      const ethSideAmount = isSmallSideToken0 ? absNet0 : absNet1;
-      const baseSideAmount = isSmallSideToken0 ? absNet1 : absNet0;
-      const isBuy = userNetBase > 0n;
-      let swapAmountIn: bigint;
-      let swapAmountOut: bigint;
-      let inputTokenAddress: string;
-      let outputTokenAddress: string;
-      let inputInfo: TokenInfo;
-      let outputInfo: TokenInfo;
-      if (isBuy) {
-        swapAmountIn = ethSideAmount;
-        swapAmountOut = userNetBase;
-        inputTokenAddress = WETH_ADDRESS; // or ETH
-        outputTokenAddress = baseAddress;
-        inputInfo = tokenInfos[WETH_ADDRESS] || UNKNOWN_TOKEN_INFO;
-        outputInfo = baseInfo;
-      } else {
-        swapAmountIn = -userNetBase;
-        swapAmountOut = ethSideAmount;
-        inputTokenAddress = baseAddress;
-        outputTokenAddress = WETH_ADDRESS;
-        inputInfo = baseInfo;
-        outputInfo = tokenInfos[WETH_ADDRESS] || UNKNOWN_TOKEN_INFO;
-      }
+
+      const inputTokenAddress = isToken0In ? currency0 : currency1;
+      const outputTokenAddress = isToken0In ? currency1 : currency0;
+      const inputInfo = isToken0In ? token0Info : token1Info;
+      const outputInfo = isToken0In ? token1Info : token0Info;
+
       // Debug logs
-      console.log(`\nDebug for pool ${index}:`);
+      console.log(`\nDebug for swap ${index + 1}:`);
       console.log(
-        `Net pool deltas: amount0=${ethers.formatUnits(
-          net.netAmount0,
+        `Pool deltas: amount0=${ethers.formatUnits(
+          swap.amount0,
           token0Info.decimals || 18
         )} ${token0Info.symbol || "token0"}, amount1=${ethers.formatUnits(
-          net.netAmount1,
+          swap.amount1,
           token1Info.decimals || 18
         )} ${token1Info.symbol || "token1"}`
       );
       console.log(`Pool key: ${currency0} / ${currency1}`);
+      console.log(`Detected direction: isToken0In=${isToken0In}`);
+
+      // Prefer event amounts, override with net only if event is zero
+      let swapAmountIn = eventAmountIn;
+      let swapAmountOut = eventAmountOut;
+
+      const netInSum = transfers
+        .filter(
+          (t) =>
+            t.token.toLowerCase() === inputTokenAddress && t.from === userWallet
+        )
+        .reduce((sum, t) => sum + t.value, 0n);
+
+      if (
+        swapAmountIn === 0n &&
+        inputTokenAddress !== ETH_ADDRESS &&
+        netInSum > 0n
+      ) {
+        swapAmountIn = netInSum;
+      }
+
+      const netOutSum = transfers
+        .filter(
+          (t) =>
+            t.token.toLowerCase() === outputTokenAddress && t.to === userWallet
+        )
+        .reduce((sum, t) => sum + t.value, 0n);
+
+      if (
+        swapAmountOut === 0n &&
+        outputTokenAddress !== ETH_ADDRESS &&
+        netOutSum > 0n
+      ) {
+        swapAmountOut = netOutSum;
+      }
+
+      if (inputTokenAddress === ETH_ADDRESS && swapAmountIn === 0n) {
+        swapAmountIn = transaction.value;
+      }
+
       console.log(
-        `User net base: ${ethers.formatUnits(
-          userNetBase,
-          baseInfo.decimals || 18
-        )} ${baseInfo.symbol || baseAddress}`
+        `Event amounts: in=${ethers.formatUnits(
+          eventAmountIn,
+          inputInfo.decimals || 18
+        )} ${inputInfo.symbol || inputTokenAddress}, out=${ethers.formatUnits(
+          eventAmountOut,
+          outputInfo.decimals || 18
+        )} ${outputInfo.symbol || outputTokenAddress}`
       );
-      console.log(`Small side (ETH): ${ethers.formatEther(ethSideAmount)} ETH`);
       console.log(
-        `Large side (base): ${ethers.formatUnits(
-          baseSideAmount,
-          baseInfo.decimals || 18
-        )} ${baseInfo.symbol || baseAddress}`
+        `Net in sum: ${ethers.formatUnits(netInSum, inputInfo.decimals || 18)}`
       );
-      console.log(`Detected direction: ${isBuy ? "BUY" : "SELL"}`);
+      console.log(
+        `Net out sum: ${ethers.formatUnits(
+          netOutSum,
+          outputInfo.decimals || 18
+        )}`
+      );
       console.log(
         `Final amounts: in=${ethers.formatUnits(
           swapAmountIn,
@@ -439,11 +354,14 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           outputInfo.decimals || 18
         )} ${outputInfo.symbol || outputTokenAddress}`
       );
-      if (swapAmountIn === 0n) {
-        console.warn(`Swap amount in is zero for pool ${index}. Skipping.`);
-        index++;
+
+      if (swapAmountIn === 0n && swapAmountOut === 0n) {
+        console.warn(
+          `Both swap amounts are zero for swap ${index + 1}. Skipping.`
+        );
         continue;
       }
+
       const amountInDecimal = ethers.formatUnits(
         swapAmountIn,
         inputInfo.decimals
@@ -452,40 +370,60 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         swapAmountOut,
         outputInfo.decimals
       );
+
+      // Corrected ETH/Base amounts for price calc
+      const isEthOrWethInput =
+        inputTokenAddress === ETH_ADDRESS || inputTokenAddress === WETH_ADDRESS;
+      const isEthOrWethOutput =
+        outputTokenAddress === ETH_ADDRESS ||
+        outputTokenAddress === WETH_ADDRESS;
+      let ethSideAmount: bigint;
+      let baseSideAmount: bigint;
+      if (isEthOrWethInput) {
+        ethSideAmount = swapAmountIn;
+        baseSideAmount = swapAmountOut;
+      } else if (isEthOrWethOutput) {
+        ethSideAmount = swapAmountOut;
+        baseSideAmount = swapAmountIn;
+      } else {
+        console.warn(`No ETH/WETH side in swap ${index + 1}. Skipping.`);
+        continue;
+      }
       const ethDeltaDecimal = ethers.formatUnits(ethSideAmount, 18);
       const baseDeltaDecimal = ethers.formatUnits(
         baseSideAmount,
         baseInfo.decimals
       );
+
       const effectiveEthPerBaseNum =
         parseFloat(ethDeltaDecimal) / parseFloat(baseDeltaDecimal) || 0;
       const effectiveEthPerBase = effectiveEthPerBaseNum.toFixed(10);
-      // BigInt spot price calculation
+
       let spotEthPerBaseNum = 0;
-      if (net.sqrtPriceX96 && net.sqrtPriceX96 !== 0n) {
-        const Q96 = 2n ** 96n;
-        const sqrtPrice = net.sqrtPriceX96;
-        const priceNum = (sqrtPrice * sqrtPrice) / (Q96 * Q96);
-        const decDiff = BigInt(
-          (token0Info.decimals || 18) - (token1Info.decimals || 18)
-        );
-        let adjustedPrice = priceNum * 10n ** decDiff;
-        // Override isEthSideToken0 based on small side
-        const overrideIsEthSideToken0 = isSmallSideToken0;
-        const adjustedPriceStr = adjustedPrice.toString();
-        const adjustedPriceNum = parseFloat(adjustedPriceStr);
-        spotEthPerBaseNum = overrideIsEthSideToken0
-          ? 1 / adjustedPriceNum
-          : adjustedPriceNum;
+      if (swap.sqrtPriceX96) {
+        const sqrtPrice = Number(swap.sqrtPriceX96) / Math.pow(2, 96);
+        const rawPriceToken1PerToken0 = sqrtPrice ** 2;
+        const decDiff = token0Info.decimals - token1Info.decimals;
+        const adjustedPriceToken1PerToken0 =
+          rawPriceToken1PerToken0 * Math.pow(10, decDiff);
+        const isEthSideToken0 =
+          currency0 === ETH_ADDRESS || currency0 === WETH_ADDRESS;
+        spotEthPerBaseNum = isEthSideToken0
+          ? 1 / adjustedPriceToken1PerToken0
+          : adjustedPriceToken1PerToken0;
       }
       const spotEthPerBase = spotEthPerBaseNum.toFixed(10);
+
       const usdPerBase = ethUsd * spotEthPerBaseNum;
       const usdPriceStr = `$${usdPerBase.toFixed(4)}`;
-      const inputPrice = isBuy ? ethUsd : usdPerBase;
+
+      const inputPrice = isEthOrWethInput ? ethUsd : usdPerBase;
       const tradeUsdValue = parseFloat(amountInDecimal) * inputPrice;
+
       const usdVolumeNum = tradeUsdValue;
       const usdVolumeStr = `$${usdVolumeNum.toFixed(2)}`;
-      console.log(`\n--- Formatted V4 Swap ${index} ---`);
+
+      console.log(`\n--- Formatted V4 Swap ${index + 1} ---`);
       console.log(`Pair: ${inputInfo.symbol}/${outputInfo.symbol}`);
       console.log(
         `Input: ${formatAmount(
@@ -511,10 +449,14 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
           2
         )} | Volume USD: ${usdVolumeStr}`
       );
+
+      const isBuy =
+        outputTokenAddress !== ETH_ADDRESS &&
+        outputTokenAddress !== WETH_ADDRESS;
       const isNativeInput =
         inputTokenAddress === ETH_ADDRESS || inputTokenAddress === WETH_ADDRESS;
       tradeEvents.push({
-        event: `Swap${index}`,
+        event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
         timestamp,
@@ -524,7 +466,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         inputVolume: amountInDecimal,
         mint: baseAddress,
         type: isBuy ? "BUY" : "SELL",
-        pairAddress: poolId,
+        pairAddress: swap.pool,
         programId: contractAddress,
         quoteToken: ETH_ADDRESS,
         baseDecimals: baseInfo.decimals,
@@ -536,12 +478,14 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
         protocol: "V4",
         targetTokenMint: "",
       });
-      index++;
     }
+
     if (tradeEvents.length > 0) {
-      tradeEvents.forEach((event, i) => {
+      tradeEvents.forEach((event, index) => {
         console.log(
-          `\n${"=".repeat(30)}\nFINAL TRADE EVENT ${i + 1}\n${"=".repeat(30)}`
+          `\n${"=".repeat(30)}\nFINAL TRADE EVENT ${index + 1}\n${"=".repeat(
+            30
+          )}`
         );
         console.log(
           JSON.stringify(
@@ -561,6 +505,7 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
     );
   }
 }
+
 export function collectSwapCalls(
   trace: any,
   poolManager: string,
