@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const ethPriceUsd = await fetchEthPriceUsd();
   console.log(`ETH price in USD: ${ethPriceUsd}`);
   const txHashes = [
-    "0xcd8a01a15e611a72b8e5d18142933c1ac7b304deda1e367c2dca46e41241c390",
+    "0xb80ef41ff0b19faf1151c4d4a5b657dd7839e69daa3f5075a8541d23203327b6",
   ];
   for (const txHash of txHashes) {
     // await analyzeUniswapV4Pool(txHash);

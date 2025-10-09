@@ -35,7 +35,7 @@ export interface TradeEvent {
   inputVolume: string;
   mint: string;
   targetTokenMint: string;
-  type: "BUY" | "SELL" | "UNKNOWN";
+  type: "BUY" | "SELL" | "UNKNOWN" | any;
   pairAddress?: string;
   programId: string;
   quoteToken: string;

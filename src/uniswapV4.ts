@@ -554,9 +554,10 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       const finalUsdPriceStr = `$${finalUsdPrice.toFixed(4)}`; // Use 4 decimal places for small USD prices
 
       // Calculate trade value and volume
-      const usdPerBase = spotEthPerBaseNum * ethUsd;
-      const inputPrice = isInputEthSide ? ethUsd : usdPerBase;
-      const tradeUsdValue = parseFloat(amountInDecimal) * inputPrice;
+      const baseAmountDecimal = isBuy
+        ? parseFloat(amountOutDecimal)
+        : parseFloat(amountInDecimal);
+      const tradeUsdValue = baseAmountDecimal * ethUsd;
       const volumeUsdStr = `$${tradeUsdValue.toFixed(2)}`;
       const tradeUsdValueStr = `$${tradeUsdValue.toFixed(2)}`;
 
@@ -785,9 +786,10 @@ export async function analyzeV4Transaction(txHash: string): Promise<void> {
       const finalUsdPriceStr = `$${finalUsdPrice.toFixed(4)}`; // Use 4 decimal places for small USD prices
 
       // Calculate trade value and volume
-      const usdPerBase = spotEthPerBaseNum * ethUsd;
-      const inputPrice = isInputEthSide ? ethUsd : usdPerBase;
-      const tradeUsdValue = parseFloat(amountInDecimal) * inputPrice;
+      const baseAmountDecimal = isBuy
+        ? parseFloat(amountOutDecimal)
+        : parseFloat(amountInDecimal);
+      const tradeUsdValue = baseAmountDecimal * ethUsd;
       const volumeUsdStr = `$${tradeUsdValue.toFixed(2)}`;
       const tradeUsdValueStr = `$${tradeUsdValue.toFixed(2)}`;
 
