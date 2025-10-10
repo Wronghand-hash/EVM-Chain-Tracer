@@ -41,19 +41,6 @@ export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
         symbol: "USDC",
         name: "USD Coin",
       },
-      // Hardcoded for this tx's token (修仙) to minimize calls
-      "0x44443dd87ec4d1bea3425acc118adb023f07f91b": {
-        decimals: 18,
-        symbol: "修仙",
-        name: "修仙",
-      },
-      // Pancake LP example (common)
-      "0xee2f63a49cb190962619183103d25af14ce5f538": {
-        decimals: 18,
-        symbol: "Cake-LP",
-        name: "Pancake LPs",
-      },
-      // Add more as needed for future txs
     };
     if (knownTokens[addrLower]) {
       return knownTokens[addrLower];
