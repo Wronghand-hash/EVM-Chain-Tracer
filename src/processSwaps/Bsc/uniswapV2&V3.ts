@@ -1,34 +1,32 @@
 // filename: uniswapV2&V3Bsc.ts
 import { ethers, Interface as EthersInterface } from "ethers";
-import { WBNB_ADDRESS } from "../../types/Bsc/constants";
 import {
   provider,
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
+  V2_SWAP_EVENT_TOPIC,
+  V3_SWAP_EVENT_TOPIC,
+  v2SwapIface,
+  v3SwapIface,
   TRANSFER_TOPIC,
   transferIface,
-  V2_SWAP_EVENT_TOPIC,
-  v2SwapIface,
-  V3_SWAP_EVENT_TOPIC,
-  v3SwapIface,
+  UNKNOWN_TOKEN_INFO,
+  WBNB_ADDRESS,
   V2_SYNC_EVENT_TOPIC,
   v2SyncIface,
-  UNKNOWN_TOKEN_INFO,
 } from "../../types/Bsc/constants";
 import {
-  fetchBnbPriceUsd,
-  getTokenInfo,
-  getPoolTokens,
-  formatAmount,
-} from "../../utils/utils";
-import {
+  Transfer,
   SwapEvent,
   TokenInfo,
   TradeEvent,
-  Transfer,
 } from "../../types/Etherium/types";
+import {
+  getTokenInfo,
+  getPoolTokens,
+  formatAmount,
+  fetchBnbPriceUsd,
+} from "../../utils/bsc/utils";
 import * as uniswapUniversalAbi from "../../abi/bsc/universalUniswapAbi.json";
-
-// TODO: For full USD Volume/Price accuracy for non-BNB assets (BUSD, etc.) Stable token selection required
 
 export async function analyzeBscTransaction(txHash: string): Promise<void> {
   try {
@@ -197,25 +195,46 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
       (t) => t.from === "0x0000000000000000000000000000000000000000"
     );
 
-    // --- Concurrent Data Fetching ---
+    // --- Concurrent Data Fetching (minimized: only essentials) ---
     const tokenInfos: { [address: string]: TokenInfo } = {};
     const fetchPromises: Promise<any>[] = [];
 
-    // 1. Fetch token info for all token addresses found
-    Array.from(tokenAddresses).forEach((t) =>
-      fetchPromises.push(
-        getTokenInfo(t).then((info: any) => (tokenInfos[t] = info))
-      )
-    );
-
-    // 2. Fetch token pair for pools
+    // 1. Fetch token info only for pool tokens (skip logs addresses if known)
     Array.from(poolAddresses).forEach((p) =>
       fetchPromises.push(
-        getPoolTokens(p).then((tokens: any) => (poolTokens[p] = tokens))
+        getTokenInfo(p).then((info: TokenInfo) => (tokenInfos[p] = info)) // LP token info
       )
     );
 
+    // 2. Fetch pool tokens (essential for pair)
+    Array.from(poolAddresses).forEach((p) =>
+      fetchPromises.push(
+        getPoolTokens(p).then(
+          (tokens: { token0: string; token1: string }) =>
+            (poolTokens[p] = tokens)
+        )
+      )
+    );
+
+    // Fetch base/quote token info (from poolTokens after fetch)
     await Promise.all(fetchPromises);
+    // Post-fetch: Get info for token0/token1 (2 more, but concurrent next)
+    const baseQuotePromises: Promise<any>[] = [];
+    Object.values(poolTokens).forEach(({ token0, token1 }) => {
+      if (token0 && !tokenInfos[token0])
+        baseQuotePromises.push(
+          getTokenInfo(token0).then(
+            (info: TokenInfo) => (tokenInfos[token0] = info)
+          )
+        );
+      if (token1 && !tokenInfos[token1])
+        baseQuotePromises.push(
+          getTokenInfo(token1).then(
+            (info: TokenInfo) => (tokenInfos[token1] = info)
+          )
+        );
+    });
+    await Promise.all(baseQuotePromises);
     // --- End Concurrent Data Fetching ---
 
     // --- Debug: Log all mints (after tokenInfos is populated) ---
@@ -478,41 +497,10 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
     }
     // --- End Swap Analysis Loop ---
 
-    // Net BNB Inflow Calculation (bulletproof)
-    console.log("Calculating net BNB flow...");
-    let netBnbInflow = 0n;
-    let netInflowMsg = "N/A (skipped - use archive RPC for old blocks)";
-    try {
-      const blockNum = BigInt(receipt.blockNumber);
-      // Double-check chain before query
-      const network = await provider.getNetwork();
-      if (network.chainId !== 56n) {
-        throw new Error(
-          `Wrong chain! Expected BSC (56), got ${network.chainId}`
-        );
-      }
-      const preBalance = await provider.getBalance(userWallet, blockNum - 1n);
-      const postBalance = await provider.getBalance(userWallet, blockNum);
-      const balanceChange = postBalance - preBalance;
-      const gasCost = receipt.gasUsed * gasPrice;
-      netBnbInflow = balanceChange + gasCost;
-      const inflowBnb = ethers.formatEther(netBnbInflow);
-      const inflowUsd = (Number(inflowBnb) * bnbUsd).toFixed(2);
-      netInflowMsg =
-        netBnbInflow > 0n
-          ? `${inflowBnb} BNB inflow (~$${inflowUsd}) ✅`
-          : `${inflowBnb} BNB (outflow)`;
-    } catch (error: any) {
-      console.warn(
-        `Net flow skipped (${
-          error.message?.includes("trie")
-            ? "old block state unavailable"
-            : error.message
-        }): ${netInflowMsg}`
-      );
-    }
-    console.log(`Net BNB Flow: ${netInflowMsg}`);
-
+    // Net BNB Inflow Calculation (minimized: skipped to avoid calls)
+    console.log(
+      "Net BNB Flow: Skipped (historical balances require archive RPC)"
+    );
     // --- Final Output ---
     if (tradeEvents.length > 0) {
       tradeEvents.forEach((event, index) => {
