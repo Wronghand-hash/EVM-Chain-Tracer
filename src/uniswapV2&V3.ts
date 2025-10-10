@@ -15,8 +15,8 @@ import {
   WETH_ADDRESS,
   V2_SYNC_EVENT_TOPIC,
   v2SyncIface,
-} from "./types/constants";
-import { Transfer, SwapEvent, TokenInfo, TradeEvent } from "./types/types";
+} from "./types/Etherium/constants";
+import { Transfer, SwapEvent, TokenInfo, TradeEvent } from "./types/Etherium/types";
 import {
   isV2Pool,
   getTokenInfo,
@@ -24,8 +24,8 @@ import {
   formatAmount,
   fetchEthPriceUsd,
 } from "./utils/utils";
-import * as uniswapUniversalAbi from "./abi/uniswapUniversalAbi.json";
-import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
+import * as uniswapUniversalAbi from "./abi/Etherium/uniswapUniversalAbi.json";
+import * as uniswapV4PoolManagerAbi from "./abi/Etherium/uniswapV4PoolManager.json";
 
 // TODO: For full USD Volume/Price accuracy for non-ETH assets (WBTC, cbBTC) Stable token selection required
 

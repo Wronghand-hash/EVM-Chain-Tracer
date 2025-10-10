@@ -1,7 +1,7 @@
 import { ethers, Interface } from "ethers";
 // Assuming provider, TRANSFER_TOPIC, and transferIface are generic ERC20 constants
-import { provider, TRANSFER_TOPIC, transferIface } from "./types/constants";
-import { Transfer } from "./types/types";
+import { provider, TRANSFER_TOPIC, transferIface } from "./types/Etherium/constants";
+import { Transfer } from "./types/Etherium/types";
 import { formatAmount } from "./utils/utils"; // Used for display formatting
 // Constants
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";

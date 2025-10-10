@@ -1,6 +1,6 @@
+// filename: constants.ts
 import { Interface, ethers } from "ethers";
-import { TokenInfo } from "./types";
-import * as uniswapV4PoolManagerAbi from "../abi/uniswapV4PoolManager.json";
+import { TokenInfo } from "../Etherium/types";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -8,17 +8,6 @@ export const erc20Abi = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
   "function name() view returns (string)",
-];
-
-// In constants.ts
-export const UNISWAP_V4_POOL_MANAGER_ADDRESS =
-  "0x000000000004444c5dc75cb358380d2e3de08a90";
-export const V4_SWAP_EVENT_TOPIC =
-  "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
-export const v4SwapIface = new Interface(uniswapV4PoolManagerAbi);
-
-export const erc20TransferAbi = [
-  "event Transfer(address indexed from, address indexed to, uint256 value)",
 ];
 
 export const poolAbi = [
@@ -124,6 +113,10 @@ export const v3SwapAbi = [
   },
 ];
 
+export const erc20TransferAbi = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
+];
+
 export const provider = (() => {
   if (!process.env.PROVIDER_URL) {
     throw new Error("PROVIDER_URL not set in .env file");
@@ -131,7 +124,7 @@ export const provider = (() => {
   const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
   provider.getNetwork().catch(() => {
     throw new Error(
-      "Failed to connect to the Ethereum node. Check PROVIDER_URL or node status."
+      "Failed to connect to the BSC node. Check PROVIDER_URL or node status."
     );
   });
   return provider;
@@ -143,10 +136,12 @@ export const UNKNOWN_TOKEN_INFO: TokenInfo = {
   name: "Unknown Token",
 };
 
-export const WETH_ADDRESS =
-  "0xC02aaA39b223FE8D0A0e5C4f27eAD9083C756Cc2".toLowerCase();
-export const UNISWAP_UNIVERSAL_ROUTER_ADDRESS =
-  "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD".toLowerCase();
+export const WBNB_ADDRESS =
+  "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c".toLowerCase();
+export const PANCAKE_UNIVERSAL_ROUTER_ADDRESS =
+  "0x1A0A18AC4BECDDbd6389559687d1A73d8927E416".toLowerCase();
+export const PANCAKE_ROUTER_V2_ADDRESS =
+  "0x10ED43C718714eb63d5aA57B78B54704E256024E".toLowerCase();
 
 export const v2SwapIface = new Interface(v2SwapAbi);
 export const v3SwapIface = new Interface(v3SwapAbi);
@@ -155,17 +150,3 @@ export const transferIface = new Interface(erc20TransferAbi);
 export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
 export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
 export const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
-
-// version 4 uniswap token creation
-
-// Constants
-export const DEFAULT_DECIMALS = 18;
-export const TRANSFER_TOPIC_V4 =
-  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f1606f49c0f4f7d4e3b4d8f0a7";
-export const ZERO_HASH =
-  "0x0000000000000000000000000000000000000000000000000000000000000000";
-
-// ABI fragment for Initialize event
-export const INITIALIZE_ABI = [
-  "event Initialize(bytes32 indexed id, address indexed sender, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
-];

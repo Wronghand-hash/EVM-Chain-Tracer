@@ -7,8 +7,8 @@ import {
   v4SwapIface,
   UNKNOWN_TOKEN_INFO,
   WETH_ADDRESS,
-} from "./types/constants";
-import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "./types/types";
+} from "./types/Etherium/constants";
+import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "./types/Etherium/types";
 import { getTokenInfo, formatAmount, fetchEthPriceUsd } from "./utils/utils";
 import * as uniswapV4PoolManagerAbi from "./abi/uniswapV4PoolManager.json";
 

@@ -8,9 +8,9 @@ import {
   UNISWAP_UNIVERSAL_ROUTER_ADDRESS,
   V3_SLOT0_ABI,
   UNISWAP_V4_POOL_MANAGER_ADDRESS,
-} from "../types/constants";
-import * as uniswapV4PoolManagerAbi from "../abi/uniswapV4PoolManager.json";
-import { TokenInfo } from "../types/types";
+} from "../types/Etherium/constants";
+import * as uniswapV4PoolManagerAbi from "../abi/Etherium/uniswapV4PoolManager.json";
+import { TokenInfo } from "../types/Etherium/types";
 import axios from "axios";
 
 export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {

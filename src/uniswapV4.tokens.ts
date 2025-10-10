@@ -5,10 +5,10 @@ import {
   provider,
   TRANSFER_TOPIC_V4,
   ZERO_HASH,
-} from "./types/constants";
+} from "./types/Etherium/constants";
 import { formatAmount } from "./utils/utils";
 import { Log } from "ethers";
-import { PoolCreationData, TokenCreationData } from "./types/types";
+import { PoolCreationData, TokenCreationData } from "./types/Etherium/types";
 
 function extractStringsFromInput(inputHex: string): {
   name?: string;
