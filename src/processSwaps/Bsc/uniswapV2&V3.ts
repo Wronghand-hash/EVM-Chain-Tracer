@@ -523,6 +523,18 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         console.log(`Mint amount summed from transfers (no external call).`);
       }
       // --- End Target Token Mint Detection ---
+      // Standardize native price as quote per base
+      const quoteTokenAddress = baseIsInput
+        ? outputTokenAddress
+        : inputTokenAddress;
+      const quoteInfo = baseIsInput ? outputInfo : inputInfo;
+      const nativePriceNum =
+        spotNum > 0 ? (baseIsInput ? 1 / spotNum : spotNum) : 0;
+      console.log(
+        `Native price standardized as ${formatTinyNum(nativePriceNum)} ${
+          quoteInfo.symbol
+        } per ${baseSymbol} (no external call).`
+      );
       console.log(
         `\n===== Swap ${index + 1} (${swap.protocol}, Pool: ${swap.pool}) =====`
       );
@@ -550,9 +562,9 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         )}`
       );
       console.log(
-        `Spot Price: ${formatTinyNum(spotNum)} ${inputInfo.symbol} per ${
-          outputInfo.symbol
-        } | USD per ${baseSymbol}: ${usdPerBaseToken.toFixed(
+        `Spot Price: ${formatTinyNum(nativePriceNum)} ${
+          quoteInfo.symbol
+        } per ${baseSymbol} | USD per ${baseSymbol}: ${usdPerBaseToken.toFixed(
           6
         )} | Total Volume: ${totalUsdVolume.toFixed(6)}`
       );
@@ -566,9 +578,9 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         txHash,
         timestamp,
         usdPrice: usdPerBaseToken.toFixed(10),
-        nativePrice: `${formatTinyNum(spotNum)} ${inputInfo.symbol}/${
-          outputInfo.symbol
-        }`,
+        nativePrice: `${formatTinyNum(nativePriceNum)} ${
+          quoteInfo.symbol
+        } per ${baseSymbol}`,
         volume: totalUsdVolume.toFixed(10),
         inputVolume: finalAmountIn.toString(),
         mint: baseTokenAddress,
@@ -582,9 +594,9 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
             : "SELL",
         pairAddress: swap.pool,
         programId: routerAddress,
-        quoteToken: inputTokenAddress,
+        quoteToken: quoteTokenAddress,
         baseDecimals: baseInfo.decimals,
-        quoteDecimals: inputInfo.decimals,
+        quoteDecimals: quoteInfo.decimals,
         tradeType: `${inputInfo.symbol} -> ${outputInfo.symbol}`,
         walletAddress: userWallet,
         protocol: swap.protocol,
