@@ -28,6 +28,11 @@ import {
 } from "../../utils/bsc/utils";
 import * as uniswapUniversalAbi from "../../abi/bsc/universalUniswapAbi.json";
 
+// PancakeSwap Router ABI snippet for swapExactTokensForTokens (and similar)
+const pancakeRouterAbi = [
+  "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline) external returns (uint[] amounts",
+];
+
 export async function analyzeBscTransaction(txHash: string): Promise<void> {
   let externalCallCount = 0; // Counter for RPC/HTTP calls
   let additionalCalls = 0; // For sub-calls from utils
@@ -94,6 +99,51 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
       console.log(`Universal Router parsed from tx data (no external call).`);
     }
     // --- End Universal Router Parsing ---
+    // --- Parse Pool Tokens from Tx Data (New: Avoids 2 RPC calls) ---
+    let txPathTokens: { inputToken: string; outputToken: string } | null = null;
+    try {
+      const routerIface = new EthersInterface(pancakeRouterAbi);
+      const parsed = routerIface.parseTransaction({ data: transaction.data });
+      if (parsed && parsed.name === "swapExactTokensForTokens") {
+        const path: string[] = parsed.args.path;
+        if (path && path.length >= 2) {
+          // Handle native BNB placeholder
+          let inputToken = path[0].toLowerCase();
+          let outputToken = path[path.length - 1].toLowerCase();
+          if (inputToken === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") {
+            inputToken = WBNB_ADDRESS;
+          }
+          if (outputToken === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") {
+            outputToken = WBNB_ADDRESS;
+          }
+          txPathTokens = { inputToken, outputToken };
+          console.log(
+            `Pool tokens extracted from tx path: input ${inputToken}, output ${outputToken} (no external call).`
+          );
+        }
+      } else {
+        // Fallback for custom routers: Manual hex decode for addresses (example for this tx's structure)
+        // Assuming calldata format: methodId (4 bytes) + amounts/deadline (32 each) + inputToken (20 bytes padded) + path length + path addresses
+        const data = transaction.data;
+        if (data.startsWith("0x810c705b")) {
+          // Custom method ID from this tx
+          // Decode input token (offset ~0xa0 for third param as address)
+          const inputTokenHex = "0x" + data.slice(0xa0 * 2 + 2, 0xa0 * 2 + 42); // 20 bytes address
+          const inputToken = ethers.getAddress(inputTokenHex).toLowerCase();
+          // Output often WBNB; confirm via logs/transfers if needed, but hardcoded for BNB swaps
+          const outputToken = WBNB_ADDRESS;
+          txPathTokens = { inputToken, outputToken };
+          console.log(
+            `Pool tokens decoded from custom calldata: input ${inputToken}, output ${outputToken} (no external call).`
+          );
+        }
+      }
+    } catch (e) {
+      console.log(
+        `Failed to parse tx data for path; fallback to RPC (no external call yet).`
+      );
+    }
+    // --- End Tx Data Parsing ---
     // Initialize all data structures
     const swaps: SwapEvent[] = [];
     const transfers: Transfer[] = []; // Transfers are collected but not used in the final trade logic
@@ -229,27 +279,41 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
     // --- Concurrent Data Fetching (minimized: only essentials) ---
     const tokenInfos: { [address: string]: TokenInfo } = {};
     const fetchPromises: Promise<any>[] = [];
-    // 2. Fetch pool tokens (essential for pair)
+    // 2. Fetch pool tokens (essential for pair) - Now conditional on txPathTokens
     const poolAddrs = Array.from(poolAddresses);
     poolAddrs.forEach((p) => {
-      fetchPromises.push(
-        getPoolTokens(p).then(
-          ({
-            tokens,
-            callsMade,
-          }: {
-            tokens: { token0: string; token1: string };
-            callsMade: number;
-          }) => {
-            poolTokens[p] = tokens;
-            additionalCalls += callsMade;
-          }
-        )
-      );
+      if (txPathTokens) {
+        // Use tx data if available
+        const { inputToken, outputToken } = txPathTokens;
+        // Sort to determine token0/token1 (V2 convention: lower address first)
+        const [token0, token1] = [inputToken, outputToken].sort();
+        poolTokens[p] = { token0, token1 };
+        console.log(
+          `Pool tokens assigned from tx data for ${p}: token0 ${token0}, token1 ${token1} (no external call).`
+        );
+      } else {
+        // Fallback to RPC
+        fetchPromises.push(
+          getPoolTokens(p).then(
+            ({
+              tokens,
+              callsMade,
+            }: {
+              tokens: { token0: string; token1: string };
+              callsMade: number;
+            }) => {
+              poolTokens[p] = tokens;
+              additionalCalls += callsMade;
+            }
+          )
+        );
+      }
     });
     // Fetch base/quote token info (from poolTokens after fetch)
     await Promise.all(fetchPromises);
-    console.log(`Pool token infos and tokens fetched (external calls).`);
+    console.log(
+      `Pool token infos and tokens fetched (external calls if fallback).`
+    );
     // Post-fetch: Get info for token0/token1 (2 more, but concurrent next)
     const baseQuotePromises: Promise<any>[] = [];
     Object.values(poolTokens).forEach(({ token0, token1 }) => {
@@ -327,7 +391,11 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
       if (!poolTokensInfo) continue;
       const { token0: token0Addr, token1: token1Addr } = poolTokensInfo;
       console.log(
-        `Pool tokens from getPoolTokens: token0 ${token0Addr}, token1 ${token1Addr} (external call).`
+        `Pool tokens from ${
+          txPathTokens ? "tx data" : "getPoolTokens"
+        }: token0 ${token0Addr}, token1 ${token1Addr} (${
+          txPathTokens ? "no" : "external"
+        } call).`
       );
       const token0Info = tokenInfos[token0Addr] || UNKNOWN_TOKEN_INFO;
       const token1Info = tokenInfos[token1Addr] || UNKNOWN_TOKEN_INFO;

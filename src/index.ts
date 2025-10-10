@@ -5,12 +5,23 @@ import { analyzeV4Transaction } from "./processSwaps/Etherium/uniswapV4";
 import { analyzeTokenCreation } from "./createTokenprocessor";
 import { analyzeUniswapV4Pool } from "./uniswapV4.tokens";
 import { analyzeBscTransaction } from "./processSwaps/Bsc/uniswapV2&V3";
+import connectDB from "./config/db";
+import mongoose from "mongoose";
 
-// Load environment variables
 dotenv.config();
 
-// In index.ts
+const initializeDB = async (): Promise<void> => {
+  if (mongoose.connection.readyState !== 1) {
+    console.log("Initializing DB connection...");
+    await connectDB();
+  } else {
+    console.log("DB already connected.");
+  }
+};
+
 async function main(): Promise<void> {
+  await initializeDB();
+
   console.log(
     "Starting analysis..." + process.env.PROVIDER_URL,
     "or " + process.env.BSC_PROVIDER_URL
@@ -22,7 +33,7 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0x11d5c8d9089524b2e83e7a497d955c5252a5ca0a0ec0572e53afdb366357cf0a",
+    "0x8532b84b82f39415688f67654e5cfdf66b163a4ba5c5a8ca78ba0696bd322249",
   ];
   for (const txHash of txHashes) {
     await analyzeBscTransaction(txHash);
