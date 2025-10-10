@@ -1,4 +1,4 @@
-// filename: utils/utils.ts
+// filename: utils/bsc/utils.ts
 import { ethers } from "ethers";
 import {
   provider,
@@ -24,7 +24,7 @@ export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
     if (addrLower === WBNB_ADDRESS) {
       return { decimals: 18, symbol: "WBNB", name: "Wrapped BNB" };
     }
-    // Expanded known tokens (hardcoded for common/minimize calls)
+    // Expanded known tokens (hardcoded for common/minimize calls) - added from this tx
     const knownTokens: { [addr: string]: TokenInfo } = {
       "0xe9e7cea3dedca5984780bafc599bd69add087d56": {
         decimals: 18,
@@ -41,6 +41,44 @@ export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
         symbol: "USDC",
         name: "USD Coin",
       },
+      // From this tx
+      "0x44443dd87ec4d1bea3425acc118adb023f07f91b": {
+        decimals: 18,
+        symbol: "修仙",
+        name: "修仙",
+      },
+      "0x2170ed0880ac9a755fd29b2688956bd959f933f8": {
+        decimals: 18,
+        symbol: "CAKE",
+        name: "PancakeSwap",
+      }, // Assumed from pool
+      "0x8f452a1fdd388a45e1080992eff051b4dd9048d2": {
+        decimals: 18,
+        symbol: "PEPE",
+        name: "Pepe",
+      }, // Common BSC token
+      "0xe68b79e51bf826534ff37aa9cee71a3842ee9c70": {
+        decimals: 18,
+        symbol: "WAL",
+        name: "Wallet",
+      }, // Assumed
+      // Pancake LP example (common)
+      "0x91c7492e327a3a2ae7ea61efa186a37f148ecf1a": {
+        decimals: 18,
+        symbol: "Cake-LP",
+        name: "Pancake LPs",
+      },
+      "0xbe9f06b76e301b49dc345948a7a5e3418264886a": {
+        decimals: 18,
+        symbol: "Cake-LP",
+        name: "Pancake LPs",
+      },
+      "0xa8f9054d78d173f9725a829e286c9a4662e2ccc8": {
+        decimals: 18,
+        symbol: "Cake-LP",
+        name: "Pancake LPs",
+      },
+      // Add more as needed for future txs
     };
     if (knownTokens[addrLower]) {
       return knownTokens[addrLower];
