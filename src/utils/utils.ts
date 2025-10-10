@@ -106,3 +106,21 @@ export function collectSwapCalls(
   recurse(trace);
   return swaps;
 }
+
+export async function fetchBnbPriceUsd(): Promise<number> {
+  try {
+    // Using free CoinGecko API - no API key required, rate limit 30 calls/min
+    const response = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd"
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    return data.binancecoin.usd;
+  } catch (error) {
+    console.error("Error fetching BNB price:", error);
+    // Fallback mock price or 0
+    return 600; // Approximate fallback ~$600
+  }
+}

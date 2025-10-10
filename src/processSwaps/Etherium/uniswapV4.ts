@@ -9,10 +9,10 @@ import {
   WETH_ADDRESS,
   V3_SWAP_EVENT_TOPIC,
   v3SwapIface,
-} from "./types/Etherium/constants";
-import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "./types/Etherium/types";
-import { getTokenInfo, formatAmount, fetchEthPriceUsd } from "./utils/utils";
-import * as uniswapV4PoolManagerAbi from "./abi/Etherium/uniswapV4PoolManager.json";
+} from "../../types/Etherium/constants";
+import { SwapEvent, Transfer, TokenInfo, TradeEvent } from "../../types/Etherium/types";
+import { getTokenInfo, formatAmount, fetchEthPriceUsd } from "../../utils/utils";
+import * as uniswapV4PoolManagerAbi from "../../abi/Etherium/uniswapV4PoolManager.json";
 const V4_INITIALIZE_EVENT_TOPIC =
   "0x5d5d851e58a74e64f849a2636f29e1f579979965d1b32d56a7c390500e281561";
 const initializeIface = new ethers.Interface(
