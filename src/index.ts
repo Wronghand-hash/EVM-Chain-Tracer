@@ -22,7 +22,7 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0x7c7d3b2a311456fc74a2a1fa575a37d9ce695ba5d7f7655cb50003d9b7d4fb78",
+    "0x11d5c8d9089524b2e83e7a497d955c5252a5ca0a0ec0572e53afdb366357cf0a",
   ];
   for (const txHash of txHashes) {
     await analyzeBscTransaction(txHash);

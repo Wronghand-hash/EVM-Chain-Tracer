@@ -12,17 +12,28 @@ import { TokenInfo } from "../../types/Etherium/types";
 export async function isV2Pool(poolAddress: string): Promise<boolean> {
   try {
     // Simplified: Assume V2 for Pancake/Uniswap forks on BSC (most common); skip call if not critical
+    console.log(`isV2Pool: Assuming V2 for ${poolAddress} (no external call).`);
     return true; // Maintains functionality without slot0 call
   } catch {
+    console.log(`isV2Pool fallback: true (no external call).`);
     return true;
   }
 }
 
-export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
+export async function getTokenInfo(
+  tokenAddress: string
+): Promise<{ info: TokenInfo; callsMade: number }> {
+  let callsMade = 0;
   try {
     const addrLower = tokenAddress.toLowerCase();
     if (addrLower === WBNB_ADDRESS) {
-      return { decimals: 18, symbol: "WBNB", name: "Wrapped BNB" };
+      console.log(
+        `Token info for WBNB from hardcoded (no external call): decimals 18, symbol WBNB.`
+      );
+      return {
+        info: { decimals: 18, symbol: "WBNB", name: "Wrapped BNB" },
+        callsMade: 0,
+      };
     }
     // Expanded known tokens (hardcoded for common/minimize calls) - added from this tx
     const knownTokens: { [addr: string]: TokenInfo } = {
@@ -62,6 +73,11 @@ export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
         symbol: "WAL",
         name: "Wallet",
       }, // Assumed
+      "0xde04da55b74435d7b9f2c5c62d9f1b53929b09aa": {
+        decimals: 18,
+        symbol: "AICELL",
+        name: "AICell",
+      }, // From recent TX analysis
       // Pancake LP example (common)
       "0x91c7492e327a3a2ae7ea61efa186a37f148ecf1a": {
         decimals: 18,
@@ -81,45 +97,77 @@ export async function getTokenInfo(tokenAddress: string): Promise<TokenInfo> {
       // Add more as needed for future txs
     };
     if (knownTokens[addrLower]) {
-      return knownTokens[addrLower];
+      console.log(
+        `Token info for ${addrLower} from known cache (no external call): decimals ${knownTokens[addrLower].decimals}, symbol ${knownTokens[addrLower].symbol}.`
+      );
+      return { info: knownTokens[addrLower], callsMade: 0 };
     }
 
-    // Fallback: Assume 18 decimals for unknowns (common on BSC); skip calls for symbol/name if non-critical
-    // To maintain: Call only decimals (1 call vs 3)
+    // Fallback: Call decimals and symbol for unknowns
+    console.log(
+      `Token info for unknown ${addrLower}: calling decimals and symbol RPC (external calls).`
+    );
     const contract = new ethers.Contract(
       addrLower,
-      ["function decimals() view returns (uint8)"],
+      [
+        "function decimals() view returns (uint8)",
+        "function symbol() view returns (string)",
+      ],
       provider
     );
-    const decimals = await contract.decimals();
-    console.log(`Fetched decimals for ${addrLower}: ${decimals}`);
+    const [decimals, symbol] = await Promise.all([
+      contract.decimals(),
+      contract.symbol(),
+    ]);
+    callsMade = 2; // decimals + symbol
+    console.log(
+      `Fetched decimals for ${addrLower}: ${decimals} (external call).`
+    );
+    console.log(`Fetched symbol for ${addrLower}: ${symbol} (external call).`);
     return {
-      decimals: Number(decimals),
-      symbol: "UNKNOWN", // Skip symbol call
-      name: "Unknown Token", // Skip name call
+      info: {
+        decimals: Number(decimals),
+        symbol: symbol || "UNKNOWN",
+        name: "Unknown Token",
+      },
+      callsMade,
     };
   } catch (error) {
     console.error(`Failed to fetch token info for ${tokenAddress}:`, error);
-    return { ...UNKNOWN_TOKEN_INFO, decimals: 18 }; // Assume 18 to maintain formatting
+    console.log(
+      `Fallback token info for ${tokenAddress}: assuming decimals 18 (no successful external call).`
+    );
+    return { info: { ...UNKNOWN_TOKEN_INFO, decimals: 18 }, callsMade: 0 };
   }
 }
 
 export async function getPoolTokens(
   poolAddress: string
-): Promise<{ token0: string; token1: string }> {
+): Promise<{ tokens: { token0: string; token1: string }; callsMade: number }> {
+  let callsMade = 0;
   try {
+    console.log(
+      `Fetching pool tokens for ${poolAddress} via RPC calls (external).`
+    );
     const poolContract = new ethers.Contract(poolAddress, poolAbi, provider);
     const [token0, token1] = await Promise.all([
       poolContract.token0(),
       poolContract.token1(),
     ]);
+    callsMade = 2; // token0 + token1
     console.log(
-      `Fetched tokens for pool ${poolAddress}: ${token0} / ${token1}`
+      `Fetched tokens for pool ${poolAddress}: ${token0} / ${token1} (external calls).`
     );
-    return { token0: token0.toLowerCase(), token1: token1.toLowerCase() };
+    return {
+      tokens: { token0: token0.toLowerCase(), token1: token1.toLowerCase() },
+      callsMade,
+    };
   } catch (error) {
     console.error(`Failed to fetch tokens for pool ${poolAddress}:`, error);
-    return { token0: "", token1: "" }; // Fallback; maintain by assuming from reserves if needed
+    console.log(
+      `Fallback pool tokens for ${poolAddress}: empty (no successful external call).`
+    );
+    return { tokens: { token0: "", token1: "" }, callsMade: 0 };
   }
 }
 
@@ -128,12 +176,16 @@ export function formatAmount(
   decimals: number,
   symbol: string
 ): string {
+  console.log(
+    `Formatting amount ${amount} with decimals ${decimals}, symbol ${symbol} (no external call).`
+  );
   return `${ethers.formatUnits(amount, decimals)} ${symbol}`;
 }
 
 export async function fetchBnbPriceUsd(): Promise<number> {
   try {
     // Keep 1 HTTP call (essential for USD)
+    console.log(`Fetching BNB USD price via HTTP (external call).`);
     const response = await fetch(
       "https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd"
     );
@@ -141,10 +193,11 @@ export async function fetchBnbPriceUsd(): Promise<number> {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
     const data = await response.json();
-    console.log(`Fetched BNB price: $${data.binancecoin.usd}`);
+    console.log(`Fetched BNB price: $${data.binancecoin.usd} (external call).`);
     return data.binancecoin.usd;
   } catch (error) {
     console.error("Error fetching BNB price:", error);
+    console.log(`Fallback BNB price: 600 (no successful external call).`);
     return 600; // Fallback
   }
 }
