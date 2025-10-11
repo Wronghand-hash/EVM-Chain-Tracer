@@ -57,13 +57,7 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
     const transaction = await provider.getTransaction(txHash);
     if (!transaction) throw new Error(`Transaction not found: ${txHash}`);
     console.log(`Transaction details fetched via RPC (external call).`);
-    // RPC Call 3: getBlock
-    externalCallCount++;
-    const block = await provider.getBlock(receipt.blockNumber);
-    const timestamp = block?.timestamp || Math.floor(Date.now() / 1000);
-    console.log(
-      `Block details fetched via RPC (external call). Timestamp from block: ${timestamp} (no additional call).`
-    );
+
     const userWallet = transaction.from.toLowerCase();
     console.log(
       `User wallet extracted from tx: ${userWallet} (no external call).`
@@ -607,7 +601,7 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         event: `Swap${index + 1}`,
         status: "Success ✅",
         txHash,
-        timestamp,
+        timestamp: receipt.blockNumber,
         usdPrice: usdPerBaseToken.toFixed(10),
         nativePrice: `${formatTinyNum(nativePriceNum)} ${
           quoteInfo.symbol
