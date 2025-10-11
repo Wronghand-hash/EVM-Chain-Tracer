@@ -34,7 +34,7 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0x6c860d268d1072b058c78ef83e73e290ce4596a04e503557c065605859c3ad69",
+    "0x72c9d2ac7e932aba2e462e40203becbf84018fe77893eb437742d1c412b19d86",
   ];
   for (const txHash of txHashes) {
     await analyzeTokenCreationBSC(txHash);
