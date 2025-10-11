@@ -5,6 +5,7 @@ import { analyzeV4Transaction } from "./processSwaps/Etherium/uniswapV4";
 import { analyzeTokenCreation } from "./createTokenprocessor";
 import { analyzeUniswapV4Pool } from "./uniswapV4.tokens";
 import { analyzeBscTransaction } from "./processSwaps/Bsc/uniswapV2&V3";
+import { analyzeTokenCreationBSC } from "./processInfo/bsc/uniswap&pancakeSwap";
 import connectDB from "./config/db";
 import mongoose from "mongoose";
 
@@ -33,10 +34,11 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0x12990e9e6c9a5d3700245a3f59da0a772b6ac06973d7b8cfda62aca4b7379ead",
+    "0x6c860d268d1072b058c78ef83e73e290ce4596a04e503557c065605859c3ad69",
   ];
   for (const txHash of txHashes) {
-    await analyzeBscTransaction(txHash);
+    await analyzeTokenCreationBSC(txHash);
+    // await analyzeBscTransaction(txHash);
     // await analyzeUniswapV4Pool(txHash);
     // await analyzeTokenCreation(txHash);
     // await analyzeTransaction(txHash); // V2/V3
