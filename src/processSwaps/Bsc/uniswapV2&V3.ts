@@ -1,4 +1,3 @@
-// filename: uniswapV2&V3Bsc.ts
 import { ethers, Interface as EthersInterface } from "ethers";
 import {
   provider,
@@ -25,13 +24,16 @@ import {
   getPoolTokens,
   formatAmount,
   fetchBnbPriceUsd,
+  formatTinyNum,
 } from "../../utils/bsc/utils";
 import * as uniswapUniversalAbi from "../../abi/bsc/universalUniswapAbi.json";
 
-// PancakeSwap Router ABI snippet for swapExactTokensForTokens (and similar)
 const pancakeRouterAbi = [
   "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] path, address to, uint deadline) external returns (uint[] amounts",
 ];
+
+import TokenInfoModel from "../../models/tokenInfo.schema";
+import PoolTokenModel from "../../models/poolToken.schema";
 
 export async function analyzeBscTransaction(txHash: string): Promise<void> {
   let externalCallCount = 0; // Counter for RPC/HTTP calls
@@ -94,12 +96,10 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         const commands: string = parsed.args.commands;
         const inputs: string[] = parsed.args.inputs;
         console.log(`Universal Router Commands: ${commands}`);
-        // `inputs` are available but not currently used in this script
       }
       console.log(`Universal Router parsed from tx data (no external call).`);
     }
     // --- End Universal Router Parsing ---
-    // --- Parse Pool Tokens from Tx Data (New: Avoids 2 RPC calls) ---
     let txPathTokens: { inputToken: string; outputToken: string } | null = null;
     try {
       const routerIface = new EthersInterface(pancakeRouterAbi);
@@ -121,32 +121,15 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
             `Pool tokens extracted from tx path: input ${inputToken}, output ${outputToken} (no external call).`
           );
         }
-      } else {
-        // Fallback for custom routers: Manual hex decode for addresses (example for this tx's structure)
-        // Assuming calldata format: methodId (4 bytes) + amounts/deadline (32 each) + inputToken (20 bytes padded) + path length + path addresses
-        const data = transaction.data;
-        if (data.startsWith("0x810c705b")) {
-          // Custom method ID from this tx
-          // Decode input token (offset ~0xa0 for third param as address)
-          const inputTokenHex = "0x" + data.slice(0xa0 * 2 + 2, 0xa0 * 2 + 42); // 20 bytes address
-          const inputToken = ethers.getAddress(inputTokenHex).toLowerCase();
-          // Output often WBNB; confirm via logs/transfers if needed, but hardcoded for BNB swaps
-          const outputToken = WBNB_ADDRESS;
-          txPathTokens = { inputToken, outputToken };
-          console.log(
-            `Pool tokens decoded from custom calldata: input ${inputToken}, output ${outputToken} (no external call).`
-          );
-        }
       }
     } catch (e) {
       console.log(
         `Failed to parse tx data for path; fallback to RPC (no external call yet).`
       );
     }
-    // --- End Tx Data Parsing ---
     // Initialize all data structures
     const swaps: SwapEvent[] = [];
-    const transfers: Transfer[] = []; // Transfers are collected but not used in the final trade logic
+    const transfers: Transfer[] = [];
     const tokenAddresses = new Set<string>();
     const poolAddresses = new Set<string>();
     const poolReserves: {
@@ -164,7 +147,6 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
       console.log(
         `Log address extracted from log: ${logAddrLower} (no external call).`
       );
-      // Early detection for token mints (Transfers from 0x0)
       if (topic0 === TRANSFER_TOPIC?.toLowerCase()) {
         try {
           const parsed = transferIface.parseLog(log);
@@ -179,7 +161,6 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
             console.log(
               `Transfer parsed from log (no external call): from ${transfer.from} to ${transfer.to}, value ${transfer.value} of token ${transfer.token}.`
             );
-            // Flag mints (from zero address)
             if (
               transfer.from === "0x0000000000000000000000000000000000000000"
             ) {
@@ -282,66 +263,79 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
     // 2. Fetch pool tokens (essential for pair) - Now conditional on txPathTokens
     const poolAddrs = Array.from(poolAddresses);
     poolAddrs.forEach((p) => {
-      if (txPathTokens) {
-        // Use tx data if available
-        const { inputToken, outputToken } = txPathTokens;
-        // Sort to determine token0/token1 (V2 convention: lower address first)
-        const [token0, token1] = [inputToken, outputToken].sort();
-        poolTokens[p] = { token0, token1 };
-        console.log(
-          `Pool tokens assigned from tx data for ${p}: token0 ${token0}, token1 ${token1} (no external call).`
-        );
-      } else {
-        // Fallback to RPC
-        fetchPromises.push(
-          getPoolTokens(p).then(
-            ({
-              tokens,
-              callsMade,
-            }: {
-              tokens: { token0: string; token1: string };
-              callsMade: number;
-            }) => {
-              poolTokens[p] = tokens;
-              additionalCalls += callsMade;
-            }
-          )
-        );
-      }
+      fetchPromises.push(
+        (async () => {
+          // Try DB first
+          const dbPool = await PoolTokenModel.findOne({
+            poolAddress: p.toLowerCase(),
+          });
+          if (dbPool) {
+            poolTokens[p] = { token0: dbPool.token0, token1: dbPool.token1 };
+            console.log(
+              `Pool tokens fetched from DB for ${p}: token0 ${dbPool.token0}, token1 ${dbPool.token1} (no external call).`
+            );
+          } else if (txPathTokens) {
+            // Use tx data if available
+            const { inputToken, outputToken } = txPathTokens;
+            // Sort to determine token0/token1 (V2 convention: lower address first)
+            const [token0, token1] = [inputToken, outputToken].sort();
+            poolTokens[p] = { token0, token1 };
+            console.log(
+              `Pool tokens assigned from tx data for ${p}: token0 ${token0}, token1 ${token1} (no external call).`
+            );
+          } else {
+            // Fallback to RPC
+            const result = await getPoolTokens(p);
+            poolTokens[p] = result.tokens;
+            additionalCalls += result.callsMade;
+            console.log(
+              `Pool tokens fetched from RPC for ${p} (external call).`
+            );
+          }
+        })()
+      );
     });
-    // Fetch base/quote token info (from poolTokens after fetch)
     await Promise.all(fetchPromises);
-    console.log(
-      `Pool token infos and tokens fetched (external calls if fallback).`
-    );
-    // Post-fetch: Get info for token0/token1 (2 more, but concurrent next)
-    const baseQuotePromises: Promise<any>[] = [];
+    console.log(`Pool token infos and tokens fetched (DB/tx/RPC as needed).`);
+    // Post-fetch: Get info for token0/token1 (2 more, but concurrent next) - With DB fallback
+    const uniqueTokens = new Set<string>();
     Object.values(poolTokens).forEach(({ token0, token1 }) => {
-      if (token0 && !tokenInfos[token0]) {
-        baseQuotePromises.push(
-          getTokenInfo(token0).then(
-            ({ info, callsMade }: { info: TokenInfo; callsMade: number }) => {
-              tokenInfos[token0] = info;
-              additionalCalls += callsMade;
+      if (token0) uniqueTokens.add(token0);
+      if (token1) uniqueTokens.add(token1);
+    });
+    const tokenFetchPromises: Promise<any>[] = [];
+    uniqueTokens.forEach((token) => {
+      if (!tokenInfos[token]) {
+        tokenFetchPromises.push(
+          (async () => {
+            // Try DB first
+            const dbToken = await TokenInfoModel.findOne({
+              address: token.toLowerCase(),
+            });
+            if (dbToken) {
+              tokenInfos[token] = {
+                decimals: dbToken.decimals,
+                symbol: dbToken.symbol,
+                name: dbToken.name,
+              };
+              console.log(
+                `Token info fetched from DB for ${token}: decimals ${dbToken.decimals}, symbol ${dbToken.symbol} (no external call).`
+              );
+            } else {
+              // Fallback to RPC
+              const result = await getTokenInfo(token);
+              tokenInfos[token] = result.info;
+              additionalCalls += result.callsMade;
+              console.log(
+                `Token info fetched from RPC for ${token} (external call).`
+              );
             }
-          )
-        );
-      }
-      if (token1 && !tokenInfos[token1]) {
-        baseQuotePromises.push(
-          getTokenInfo(token1).then(
-            ({ info, callsMade }: { info: TokenInfo; callsMade: number }) => {
-              tokenInfos[token1] = info;
-              additionalCalls += callsMade;
-            }
-          )
+          })()
         );
       }
     });
-    await Promise.all(baseQuotePromises);
-    console.log(
-      `Base/quote token infos fetched (external calls where needed).`
-    );
+    await Promise.all(tokenFetchPromises);
+    console.log(`Base/quote token infos fetched (DB/RPC as needed).`);
     // --- End Concurrent Data Fetching ---
     // Conditional BNB price fetch
     let bnbUsd = 0;
@@ -374,17 +368,6 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
     }
     // --- End Debug ---
     const tradeEvents: TradeEvent[] = [];
-    // Helper for human-readable formatting (moved outside the loop to be defined once)
-    const formatTinyNum = (num: number, isUsd: boolean = false): string => {
-      if (num === 0) return isUsd ? "$0.00" : "0";
-      if (num >= 0.01) {
-        return isUsd ? `$${num.toFixed(2)}` : num.toFixed(4);
-      } else if (num >= 1e-6) {
-        return isUsd ? `$${num.toFixed(6)}` : num.toPrecision(6);
-      } else {
-        return isUsd ? `$${num.toPrecision(3)}` : num.toPrecision(6);
-      }
-    };
     // --- Swap Analysis Loop ---
     for (const [index, swap] of swaps.entries()) {
       const poolTokensInfo = poolTokens[swap.pool];
@@ -551,8 +534,8 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
           `WBNB pricing: USD per ${baseSymbol} ${usdPerBaseToken} (using BNB price ${bnbUsd}, spot ${spotNum}). Total volume: ${totalUsdVolume}`
         );
       } else if ((isInputStable || isOutputStable) && spotNum > 0) {
-        // Stable pricing (peg=1)
-        let usdPerQuote = 1; // USDT/USDC/BUSD peg
+        // Stable pricing
+        let usdPerQuote = 1; // USDT/USDC/BUSD
         if (baseIsInput) {
           // SELL: base in, stable out -> spotNum = base / stable, so USD per base = 1 / spotNum
           usdPerBaseToken = usdPerQuote / spotNum;
@@ -571,26 +554,6 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         );
       }
       // --- End USD CALCULATION ---
-      // --- Target Token Mint Detection ---
-      let targetTokenMintAmount: bigint | null = null;
-      const targetMints = mints.filter(
-        (m) => m.token.toLowerCase() === baseTokenAddress.toLowerCase()
-      );
-      if (targetMints.length > 0) {
-        // Sum mints for target token if multiple
-        targetTokenMintAmount = targetMints.reduce(
-          (acc, m) => acc + m.value,
-          0n
-        );
-        console.log(
-          `Target token (${baseSymbol}) mint detected: ${ethers.formatUnits(
-            targetTokenMintAmount,
-            baseInfo.decimals
-          )} tokens`
-        );
-        console.log(`Mint amount summed from transfers (no external call).`);
-      }
-      // --- End Target Token Mint Detection ---
       // Standardize native price as quote per base
       const quoteTokenAddress = baseIsInput
         ? outputTokenAddress
@@ -652,9 +615,6 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
         volume: totalUsdVolume.toFixed(10),
         inputVolume: finalAmountIn.toString(),
         mint: baseTokenAddress,
-        targetTokenMint: targetTokenMintAmount
-          ? targetTokenMintAmount.toString()
-          : "",
         type:
           outputInfo.symbol !== "WBNB" &&
           !stableSymbols.includes(outputInfo.symbol)
@@ -674,10 +634,7 @@ export async function analyzeBscTransaction(txHash: string): Promise<void> {
       );
     }
     // --- End Swap Analysis Loop ---
-    // Net BNB Inflow Calculation (minimized: skipped to avoid calls)
-    console.log(
-      "Net BNB Flow: Skipped (historical balances require archive RPC)"
-    );
+
     // --- Final Output ---
     if (tradeEvents.length > 0) {
       tradeEvents.forEach((event, index) => {

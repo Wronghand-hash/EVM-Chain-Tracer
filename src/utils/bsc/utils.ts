@@ -201,3 +201,14 @@ export async function fetchBnbPriceUsd(): Promise<number> {
     return 600; // Fallback
   }
 }
+
+export const formatTinyNum = (num: number, isUsd: boolean = false): string => {
+  if (num === 0) return isUsd ? "$0.00" : "0";
+  if (num >= 0.01) {
+    return isUsd ? `$${num.toFixed(2)}` : num.toFixed(4);
+  } else if (num >= 1e-6) {
+    return isUsd ? `$${num.toFixed(6)}` : num.toPrecision(6);
+  } else {
+    return isUsd ? `$${num.toPrecision(3)}` : num.toPrecision(6);
+  }
+};
