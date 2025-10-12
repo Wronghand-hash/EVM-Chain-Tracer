@@ -43,7 +43,15 @@ export interface TradeEvent {
   quoteDecimals: number;
   tradeType: string;
   walletAddress: string;
-  protocol: "V2" | "V3" | "V4";
+  protocol:
+    | "V2"
+    | "V3"
+    | "V4"
+    | "Four.meme"
+    | "uniswapV2"
+    | "uniswapV3"
+    | "pancakeSwapV2"
+    | "pancakeSwapV3";
 }
 
 // vetsion 4 uniswap token creation
