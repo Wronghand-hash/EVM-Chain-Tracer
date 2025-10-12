@@ -179,7 +179,7 @@ export function formatAmount(
   console.log(
     `Formatting amount ${amount} with decimals ${decimals}, symbol ${symbol} (no external call).`
   );
-  return `${ethers.formatUnits(amount, decimals)} ${symbol}`;
+  return `${ethers.utils.formatUnits(amount, decimals)} ${symbol}`;
 }
 
 export async function fetchBnbPriceUsd(): Promise<number> {

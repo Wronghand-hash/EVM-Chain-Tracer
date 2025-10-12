@@ -1,4 +1,4 @@
-import { ethers, Interface } from "ethers";
+import { ethers } from "ethers";
 import {
   provider,
   TRANSFER_TOPIC,
@@ -73,11 +73,7 @@ export async function analyzeTokenCreationFourMeme(
     );
     console.log(`Status: Success ✅ | From: ${transaction.from} | To: ${txTo}`);
     console.log(`Block: ${receipt.blockNumber} | Deployer: ${userWallet}`);
-    console.log(
-      `Transaction Fee: ${ethers.formatEther(
-        receipt.gasUsed * receipt.gasPrice
-      )} BNB`
-    );
+
     let firstMint: Transfer | null = null;
     for (const log of receipt.logs) {
       if (!log.topics[0]) continue;
@@ -126,7 +122,7 @@ export async function analyzeTokenCreationFourMeme(
         "constructor(string name, string symbol, bytes32 maxSupply)",
       ];
       try {
-        const iface = new Interface(FOURMEME_CONSTRUCTOR_ABI);
+        const iface = new ethers.utils.Interface(FOURMEME_CONSTRUCTOR_ABI);
         const parsed = iface.parseTransaction({
           data: transaction.data,
         });

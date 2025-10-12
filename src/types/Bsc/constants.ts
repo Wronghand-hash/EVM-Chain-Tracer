@@ -1,5 +1,5 @@
 // filename: constants.ts
-import { ethers, Interface as EthersInterface } from "ethers";
+import { ethers } from "ethers";
 import { TokenInfo } from "../Etherium/types";
 import dotenv from "dotenv";
 dotenv.config();
@@ -21,7 +21,7 @@ export const poolAbi = [
 
 export const V2_SYNC_EVENT_TOPIC =
   "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1";
-export const v2SyncIface = new EthersInterface([
+export const v2SyncIface = new ethers.utils.Interface([
   "event Sync(uint112 reserve0, uint112 reserve1)",
 ]);
 
@@ -558,7 +558,7 @@ export const multicallAbi = [
     type: "function",
   },
 ];
-export const multicallIface = new EthersInterface(multicallAbi);
+export const multicallIface = new ethers.utils.Interface(multicallAbi);
 
 export const provider = (() => {
   let url: string;
@@ -569,7 +569,7 @@ export const provider = (() => {
     url = "https://bsc-rpc.publicnode.com";
   }
   console.log(`Using RPC: ${url}`);
-  const provider = new ethers.JsonRpcProvider(url);
+  const provider = new ethers.providers.JsonRpcProvider(url);
   // Commented out getNetwork to save 1 RPC
   // provider
   //   .getNetwork()
@@ -598,13 +598,13 @@ export const WBNB_ADDRESS =
 export const UNISWAP_UNIVERSAL_ROUTER_ADDRESS =
   "0x1906c1d672b88cd1b9ac7593301ca990f94eae07".toLowerCase();
 
-export const v2SwapIface = new EthersInterface(v2SwapAbi);
-export const v3SwapIface = new EthersInterface(v3SwapAbi);
-export const transferIface = new EthersInterface(erc20TransferAbi);
+export const v2SwapIface = new ethers.utils.Interface(v2SwapAbi);
+export const v3SwapIface = new ethers.utils.Interface(v3SwapAbi);
+export const transferIface = new ethers.utils.Interface(erc20TransferAbi);
 
-export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
-export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
-export const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
+export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap").name;
+export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap").name;
+export const TRANSFER_TOPIC = transferIface.getEvent("Transfer").name;
 
 // Export knownTokens for use in utils (to avoid duplication)
 export const knownTokens: { [addr: string]: TokenInfo } = {

@@ -1,15 +1,13 @@
 import * as dotenv from "dotenv";
-import { analyzeTransaction } from "./processSwaps/Etherium/uniswapV2&V3";
-import { fetchEthPriceUsd } from "./utils/utils";
-import { analyzeV4Transaction } from "./processSwaps/Etherium/uniswapV4";
-import { analyzeTokenCreation } from "./createTokenprocessor";
-import { analyzeUniswapV4Pool } from "./uniswapV4.tokens";
-import { analyzeBscTransaction } from "./processSwaps/Bsc/uniswapV2&V3";
 import { analyzeTokenCreationBSC } from "./processInfo/bsc/uniswap&pancakeSwap";
 import connectDB from "./config/db";
 import mongoose from "mongoose";
-import { analyzeFourMemeTransaction } from "./processSwaps/Bsc/fourMeme";
 import { analyzeTokenCreationFourMeme } from "./processInfo/bsc/fourMeme.token";
+import {
+  processFourMemes,
+  ITokenAddress,
+} from "./processSwaps/Bsc/fourMemeMain";
+import { ethers } from "ethers";
 
 dotenv.config();
 
@@ -22,6 +20,99 @@ const initializeDB = async (): Promise<void> => {
   }
 };
 
+async function processTransaction(txHash: string): Promise<void> {
+  const providerUrl = process.env.PROVIDER_URL || process.env.BSC_PROVIDER_URL;
+  if (!providerUrl) {
+    console.error(
+      "ERROR: PROVIDER_URL or BSC_PROVIDER_URL not set in .env file."
+    );
+    return;
+  }
+
+  const provider = new ethers.providers.JsonRpcProvider(providerUrl);
+  const chainSymbol = "BSC";
+  const bnbPrice = 550; // Hardcoded BNB price in USD; update as needed or fetch dynamically
+
+  console.log(`Processing tx: ${txHash}`);
+  try {
+    const tx = await provider.getTransaction(txHash);
+    if (!tx) {
+      console.error("Transaction not found");
+      return;
+    }
+
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (receipt.status !== 1) {
+      console.log("Failed transaction");
+      return;
+    }
+
+    const logs = receipt.logs;
+
+    // Identify potential token addresses (exclude known factory)
+    const factoryAddress =
+      "0x5c952063c7fc8610ffdb798152d69f0b9550762b".toLowerCase();
+    const potentialTokenAddresses = [
+      ...new Set(
+        logs
+          .map((log: any) => log.address.toLowerCase())
+          .filter((addr) => addr !== factoryAddress)
+      ),
+    ];
+
+    if (potentialTokenAddresses.length === 0) {
+      console.log("No potential tokens found");
+      return;
+    }
+
+    // Use the first potential token (adjust if multiple expected)
+    const tokenAddress = potentialTokenAddresses[0];
+
+    // Fetch token details
+    const tokenAbi = [
+      "function decimals() view returns (uint8)",
+      "function totalSupply() view returns (uint256)",
+    ];
+    const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
+
+    let decimals: number, totalSupply: string;
+    try {
+      decimals = await tokenContract.decimals();
+      totalSupply = (await tokenContract.totalSupply()).toString();
+    } catch (e) {
+      console.error("Failed to fetch token info:", e);
+      return;
+    }
+
+    const tokensAddress: ITokenAddress[] = [
+      {
+        tokenAddress,
+        totalSupply: Number(totalSupply), // Convert to number if needed; adjust based on ITokenAddress
+        decimals,
+        pairAddress: "",
+        price: "0",
+        // Defaults for optional fields
+        customToken: false,
+        solPad: false,
+        pumpfun: false,
+        associatedSwapAddresses: [],
+        pumpaiToken: false,
+        sunpump: false,
+        moonshot: false,
+        pinksale: false,
+        degen: false,
+        etherVista: false,
+        fjordData: undefined,
+      },
+    ];
+
+    // Call the function with required arguments
+    await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
+  } catch (e) {
+    console.error(`Error processing ${txHash}:`, e);
+  }
+}
+
 async function main(): Promise<void> {
   await initializeDB();
 
@@ -29,26 +120,21 @@ async function main(): Promise<void> {
     "Starting analysis..." + process.env.PROVIDER_URL,
     "or " + process.env.BSC_PROVIDER_URL
   );
-  if (!process.env.PROVIDER_URL && !process.env.BSC_PROVIDER_URL) {
-    console.error(
-      "ERROR: PROVIDER_URL or BSC_PROVIDER_URL not set in .env file."
-    );
-    return;
-  }
+
+  // Hardcoded tx hash
   const txHashes = [
-    "0x12e1bce3876938b7f14fffb40f422fb066888a0f8e0c98cdf7b58218126a42ea",
+    "0x600cb7a3e9aa5ec439750a9ac84148c11457fb0470a8fef360b460b706836741",
   ];
+
   for (const txHash of txHashes) {
-    await analyzeTokenCreationFourMeme(txHash);
-    // await analyzeFourMemeTransaction(txHash);
-    // await analyzeTokenCreationBSC(txHash);
-    // await analyzeBscTransaction(txHash);
-    // await analyzeUniswapV4Pool(txHash);
-    // await analyzeTokenCreation(txHash);
-    // await analyzeTransaction(txHash); // V2/V3
-    // await analyzeV4Transaction(txHash); // V4
+    await processTransaction(txHash);
     console.log("\n" + "=".repeat(80) + "\n");
   }
+
+  // Other commented functions can be enabled as needed
+  // await analyzeTokenCreationFourMeme(txHash);
+  // await analyzeTokenCreationBSC(txHash);
+  // etc.
 }
 
 main().catch(console.error);

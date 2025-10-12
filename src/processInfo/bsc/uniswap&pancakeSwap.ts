@@ -1,4 +1,4 @@
-import { ethers, Interface } from "ethers";
+import { ethers } from "ethers";
 import {
   provider,
   TRANSFER_TOPIC,
@@ -67,11 +67,7 @@ export async function analyzeTokenCreationBSC(txHash: string): Promise<void> {
     console.log(`\n--- Checking Token Creation on BSC: ${txHash} ---`);
     console.log(`Status: Success ✅ | From: ${transaction.from} | To: ${txTo}`);
     console.log(`Block: ${receipt.blockNumber} | Deployer: ${userWallet}`);
-    console.log(
-      `Transaction Fee: ${ethers.formatEther(
-        receipt.gasUsed * receipt.gasPrice
-      )} BNB`
-    );
+
     let firstMint: Transfer | null = null;
     for (const log of receipt.logs) {
       if (!log.topics[0]) continue;
@@ -128,7 +124,7 @@ export async function analyzeTokenCreationBSC(txHash: string): Promise<void> {
       ];
       const ERC20_ABI_WITHOUT_DEC = ["constructor(string name, string symbol)"];
       try {
-        const ifaceWithDec = new Interface(ERC20_ABI_WITH_DEC);
+        const ifaceWithDec = new ethers.utils.Interface(ERC20_ABI_WITH_DEC);
         const parsed = ifaceWithDec.parseTransaction({
           data: transaction.data,
         });
@@ -186,7 +182,9 @@ export async function analyzeTokenCreationBSC(txHash: string): Promise<void> {
 
       if (fetchedName === "Unknown") {
         try {
-          const ifaceWithoutDec = new Interface(ERC20_ABI_WITHOUT_DEC);
+          const ifaceWithoutDec = new ethers.utils.Interface(
+            ERC20_ABI_WITHOUT_DEC
+          );
           const parsed = ifaceWithoutDec.parseTransaction({
             data: transaction.data,
           });

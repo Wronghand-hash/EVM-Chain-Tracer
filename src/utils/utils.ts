@@ -52,7 +52,7 @@ export function formatAmount(
   symbol: string
 ): string {
   const absoluteValue = value < 0n ? -value : value;
-  return `${ethers.formatUnits(absoluteValue, decimals)} ${symbol}`;
+  return `${ethers.utils.formatUnits(absoluteValue, decimals)} ${symbol}`;
 }
 
 export async function isV2Pool(poolAddress: string): Promise<boolean> {

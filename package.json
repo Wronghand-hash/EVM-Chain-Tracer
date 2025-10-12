@@ -17,7 +17,7 @@
     "abi-decoder": "^2.4.0",
     "axios": "^1.12.2",
     "dotenv": "^17.2.2",
-    "ethers": "^6.15.0",
+    "ethers": "5.8.0",
     "ioredis": "^5.8.0",
     "mongoose": "^8.19.1",
     "tsx": "^4.20.6",
