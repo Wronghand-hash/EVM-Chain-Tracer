@@ -35,7 +35,7 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0xdd177313c40a27ade13ef16d9383688e4a3e5a4968a423e795ac66d1df6cd0ed",
+    "0x7c7711c3686f063879ce17a658f28f477ce24bcd447164b5c2eaa2c769927ae5",
   ];
   for (const txHash of txHashes) {
     await analyzeFourMemeTransaction(txHash);

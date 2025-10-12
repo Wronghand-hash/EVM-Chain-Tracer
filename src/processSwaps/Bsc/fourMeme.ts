@@ -64,15 +64,20 @@ export async function analyzeFourMemeTransaction(
     console.log(
       `User wallet extracted from tx: ${userWallet} (no external call).`
     );
-    const exchangeAddress = transaction.to?.toLowerCase() || "0x";
-    console.log(
-      `Exchange address extracted from tx: ${exchangeAddress} (no external call).`
-    );
 
-    if (exchangeAddress !== FOURMEME_EXCHANGE_ADDRESS) {
+    // FIXED: Detect Four.meme tx by checking logs or direct to proxy (handles routed txs via Binance DEX Router)
+    const proxyAddress = FOURMEME_EXCHANGE_ADDRESS.toLowerCase();
+    const isFourMemeTx =
+      receipt.logs.some((log) => log.address.toLowerCase() === proxyAddress) ||
+      transaction.to?.toLowerCase() === proxyAddress;
+    if (!isFourMemeTx) {
       console.log(`Not a Four.meme exchange transaction: ${txHash}`);
       return;
     }
+    const exchangeAddress = proxyAddress;
+    console.log(
+      `Four.meme tx confirmed (direct or routed): exchangeAddress=${exchangeAddress} (no external call).`
+    );
 
     console.log(`\n--- checking Four.meme Transaction: ${txHash} ---`);
     console.log(
@@ -304,41 +309,48 @@ export async function analyzeFourMemeTransaction(
         `Sell setup: inputSymbol=${inputSymbol}, outputSymbol=${outputSymbol}, inputDecimals=${inputDecimals}, outputDecimals=${outputDecimals}`
       );
 
-      // FIXED: Parse calldata using sellToken signature (no external call)
+      // FIXED: Parse calldata only for direct calls to proxy (routed sells default to 0)
       outputAmount = 0n;
-      try {
-        console.log(
-          `Parsing tx calldata for amountOutMin using sellToken signature (no external call).`
-        );
-        const parsedTx = ROUTER_IFACE.parseTransaction({
-          data: transaction.data,
-        });
-        if (parsedTx && parsedTx.name === "sellToken") {
-          // From analysis: param4 = amountIn (matches transfer.value), param5 = amountOutMin
-          const calldataAmountIn = parsedTx.args.param4 as bigint;
-          const amountOutMin = parsedTx.args.param5 as bigint;
-          if (calldataAmountIn !== inputAmount) {
-            console.warn(
-              `Calldata amountIn (${calldataAmountIn}) does not match transfer (${inputAmount}); using transfer.`
+      const isDirectToProxy = transaction.to?.toLowerCase() === exchangeAddress;
+      if (isDirectToProxy) {
+        try {
+          console.log(
+            `Parsing tx calldata for amountOutMin using sellToken signature (no external call).`
+          );
+          const parsedTx = ROUTER_IFACE.parseTransaction({
+            data: transaction.data,
+          });
+          if (parsedTx && parsedTx.name === "sellToken") {
+            // From analysis: param4 = amountIn (matches transfer.value), param5 = amountOutMin
+            const calldataAmountIn = parsedTx.args.param4 as bigint;
+            const amountOutMin = parsedTx.args.param5 as bigint;
+            if (calldataAmountIn !== inputAmount) {
+              console.warn(
+                `Calldata amountIn (${calldataAmountIn}) does not match transfer (${inputAmount}); using transfer.`
+              );
+            }
+            outputAmount = amountOutMin;
+            console.log(
+              `Calldata parsed: method=sellToken, amountIn (param4)=${calldataAmountIn}, amountOutMin (param5)=${amountOutMin}`
             );
+            console.log(
+              `Sell detected: token in ${inputAmount}, approx BNB out ${outputAmount} (from calldata amountOutMin). Note: Actual may be slightly higher due to slippage.`
+            );
+          } else {
+            console.warn(`Failed to parse calldata as sellToken; using 0.`);
           }
-          outputAmount = amountOutMin;
-          console.log(
-            `Calldata parsed: method=sellToken, amountIn (param4)=${calldataAmountIn}, amountOutMin (param5)=${amountOutMin}`
+        } catch (parseErr) {
+          console.warn(
+            `Calldata parse failed: ${
+              (parseErr as Error).message
+            }. Using 0 for output.`
           );
-          console.log(
-            `Sell detected: token in ${inputAmount}, approx BNB out ${outputAmount} (from calldata amountOutMin). Note: Actual may be slightly higher due to slippage.`
-          );
-        } else {
-          console.warn(`Failed to parse calldata as sellToken; using 0.`);
+          outputAmount = 0n;
         }
-      } catch (parseErr) {
-        console.warn(
-          `Calldata parse failed: ${
-            (parseErr as Error).message
-          }. Using 0 for output.`
+      } else {
+        console.log(
+          `Routed sell tx detected; skipping calldata parse, using 0 for outputAmount (no external call).`
         );
-        outputAmount = 0n;
       }
     }
 
@@ -387,9 +399,9 @@ export async function analyzeFourMemeTransaction(
     const usdPerBaseToken = bnbPerToken * bnbUsd;
     const baseSymbol = memeSymbol;
     console.log(
-      `USD volume: ${usdVolume} ((${
+      `USD volume: ${usdVolume} (${
         isBuy ? amountInDecimal : amountOutDecimal
-      } * ${bnbUsd})), USD per ${baseSymbol}: ${usdPerBaseToken} (bnbPerToken ${bnbPerToken} * bnbUsd ${bnbUsd}) (using BNB price ${bnbUsd}, spot ${spotNum}).`
+      } * ${bnbUsd}), USD per ${baseSymbol}: ${usdPerBaseToken} (bnbPerToken ${bnbPerToken} * bnbUsd ${bnbUsd}) (using BNB price ${bnbUsd}, spot ${spotNum}).`
     );
 
     // Standardize native price as BNB per base (meme token)
