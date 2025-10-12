@@ -4,7 +4,12 @@ import {
   WBNB_ADDRESS,
   TRANSFER_TOPIC,
 } from "../../types/Bsc/constants";
-import { Transfer, TokenInfo, TradeEvent } from "../../types/Etherium/types";
+import {
+  Transfer,
+  TokenInfo,
+  TradeEvent,
+  SwapEvent,
+} from "../../types/Etherium/types";
 import {
   getTokenInfo,
   fetchBnbPriceUsd,
@@ -17,6 +22,12 @@ import * as fourMemeAbi from "../../abi/bsc/Four.MemeAbi.json";
 import TokenInfoModel from "../../models/tokenInfo.schema";
 
 const FOURMEME_EXCHANGE_ADDRESS = "0x5c952063c7fc8610ffdb798152d69f0b9550762b";
+
+// FIXED: Hardcoded ABI for Four.meme's sellToken (confirmed via selector 0xe63aaf36)
+const FOURMEME_ROUTER_ABI = [
+  "function sellToken(uint256 param1, address param2, address param3, uint256 param4, uint256 param5, uint256 param6, address param7) external",
+];
+const ROUTER_IFACE = new EthersInterface(FOURMEME_ROUTER_ABI);
 
 export async function analyzeFourMemeTransaction(
   txHash: string
@@ -37,11 +48,17 @@ export async function analyzeFourMemeTransaction(
       return;
     }
     console.log(`Transaction receipt fetched via RPC (external call).`);
+    console.log(
+      `Receipt details: blockNumber=${receipt.blockNumber}, status=${receipt.status}, gasUsed=${receipt.gasUsed}, logs.length=${receipt.logs.length}`
+    );
     // RPC Call 2: getTransaction
     externalCallCount++;
     const transaction = await provider.getTransaction(txHash);
     if (!transaction) throw new Error(`Transaction not found: ${txHash}`);
     console.log(`Transaction details fetched via RPC (external call).`);
+    console.log(
+      `Transaction details: from=${transaction.from}, to=${transaction.to}, value=${transaction.value}, data.length=${transaction.data.length}`
+    );
 
     const userWallet = transaction.from.toLowerCase();
     console.log(
@@ -76,11 +93,15 @@ export async function analyzeFourMemeTransaction(
 
     // Initialize data structures
     const transfers: Transfer[] = [];
+    const swaps: SwapEvent[] = [];
     const tokenAddresses = new Set<string>();
     const fourMemeIface = new EthersInterface(fourMemeAbi);
 
     // --- Log Parsing Loop ---
-    for (const log of receipt.logs) {
+    for (const [logIndex, log] of receipt.logs.entries()) {
+      console.log(
+        `Processing log ${logIndex}: address=${log.address}, topics.length=${log.topics.length}`
+      );
       if (!log.topics[0]) continue;
       const topic0 = log.topics[0].toLowerCase();
       const logAddrLower = log.address.toLowerCase();
@@ -112,30 +133,54 @@ export async function analyzeFourMemeTransaction(
                 )} of token ${transfer.token} to ${transfer.to}`
               );
             }
+          } else {
+            console.log(
+              `Log ${logIndex} not a Transfer event or parse failed.`
+            );
           }
-        } catch {} // Silent fail for non-matching transfers
+        } catch (parseErr) {
+          console.log(
+            `Failed to parse log ${logIndex} as Transfer: ${
+              (parseErr as Error).message
+            }`
+          );
+        }
+      } else {
+        console.log(`Log ${logIndex} topic0=${topic0} not TRANSFER_TOPIC.`);
       }
     }
     console.log(
-      `Log parsing complete: ${transfers.length} transfers from receipt (no additional external calls).`
+      `Log parsing complete: ${swaps.length} swaps, ${transfers.length} transfers from receipt (no additional external calls).`
     );
     // --- End Log Parsing Loop ---
 
     // --- Trade Detection ---
+    console.log(
+      `Trade detection: Scanning ${transfers.length} transfers for user-exchange interaction.`
+    );
     let tradeTransfer: Transfer | null = null;
-    // Look for transfer involving the exchange and user
-    for (const transfer of transfers) {
+    for (const [transferIndex, transfer] of transfers.entries()) {
       const isExchangeInvolved =
         transfer.from === exchangeAddress || transfer.to === exchangeAddress;
       const isUserInvolved =
         transfer.from === userWallet || transfer.to === userWallet;
+      console.log(
+        `Transfer ${transferIndex}: token=${transfer.token}, from=${transfer.from}, to=${transfer.to}, isExchange=${isExchangeInvolved}, isUser=${isUserInvolved}`
+      );
       if (
         isExchangeInvolved &&
         isUserInvolved &&
-        transfer.token !== WBNB_ADDRESS
+        transfer.token !== WBNB_ADDRESS.toLowerCase()
       ) {
         tradeTransfer = transfer;
-        break; // Assume single main trade transfer
+        console.log(
+          `Trade transfer found at index ${transferIndex}: ${JSON.stringify(
+            tradeTransfer,
+            (key, value) =>
+              typeof value === "bigint" ? value.toString() : value
+          )}`
+        );
+        break;
       }
     }
 
@@ -151,11 +196,12 @@ export async function analyzeFourMemeTransaction(
     const tokenInfos: { [address: string]: TokenInfo } = {};
     const tokenFetchPromises: Promise<any>[] = [];
 
-    // Fetch token info with DB fallback
     if (!tokenInfos[tokenAddress]) {
+      console.log(
+        `Fetching token info for ${tokenAddress}: checking DB first.`
+      );
       tokenFetchPromises.push(
         (async () => {
-          // Try DB first
           const dbToken = await TokenInfoModel.findOne({
             address: tokenAddress.toLowerCase(),
           });
@@ -169,16 +215,26 @@ export async function analyzeFourMemeTransaction(
               `Token info fetched from DB for ${tokenAddress}: decimals ${dbToken.decimals}, symbol ${dbToken.symbol} (no external call).`
             );
           } else {
-            // Fallback to RPC
+            console.log(
+              `Token not in DB, falling back to RPC for ${tokenAddress}.`
+            );
             const result = await getTokenInfo(tokenAddress);
             tokenInfos[tokenAddress] = result.info;
             additionalCalls += result.callsMade;
+            await new TokenInfoModel({
+              address: tokenAddress.toLowerCase(),
+              decimals: result.info.decimals,
+              symbol: result.info.symbol,
+              name: result.info.name,
+            }).save();
             console.log(
               `Token info fetched from RPC for ${tokenAddress} (external call).`
             );
           }
         })()
       );
+    } else {
+      console.log(`Token info already cached for ${tokenAddress}.`);
     }
 
     await Promise.all(tokenFetchPromises);
@@ -194,7 +250,10 @@ export async function analyzeFourMemeTransaction(
     );
 
     // --- Amount Calculation ---
-    let isBuy = transaction.value > 0n;
+    const isBuy = transaction.value > 0n;
+    console.log(
+      `Trade type determined: isBuy=${isBuy} (based on tx.value > 0n).`
+    );
     let inputAmount: bigint;
     let outputAmount: bigint;
     let inputSymbol = "BNB";
@@ -203,29 +262,36 @@ export async function analyzeFourMemeTransaction(
     let outputDecimals = tokenInfo.decimals;
     let inputAddress = WBNB_ADDRESS;
     let outputAddress = tokenAddress;
+    const memeSymbol = tokenInfo.symbol;
 
     if (isBuy) {
-      // Buy: BNB in (from tx.value), token out (transfer to user from exchange)
       inputAmount = transaction.value;
       outputAmount = tradeTransfer.value;
+      console.log(
+        `Buy logic: inputAmount (BNB)=${inputAmount}, outputAmount (token)=${outputAmount}`
+      );
       if (
         tradeTransfer.to !== userWallet ||
         tradeTransfer.from !== exchangeAddress
       ) {
-        console.log("Unexpected transfer direction for buy.");
+        console.log(
+          `Unexpected transfer direction for buy: expected from exchange to user, got from=${tradeTransfer.from} to=${tradeTransfer.to}`
+        );
         return;
       }
       console.log(
         `Buy detected: BNB in ${inputAmount}, token out ${outputAmount} (from tx.value and transfer).`
       );
     } else {
-      // Sell: token in (transfer from user to exchange), BNB out (via balance diff)
       inputAmount = tradeTransfer.value;
+      console.log(`Sell logic: inputAmount (token)=${inputAmount}`);
       if (
         tradeTransfer.from !== userWallet ||
         tradeTransfer.to !== exchangeAddress
       ) {
-        console.log("Unexpected transfer direction for sell.");
+        console.log(
+          `Unexpected transfer direction for sell: expected from user to exchange, got from=${tradeTransfer.from} to=${tradeTransfer.to}`
+        );
         return;
       }
       inputSymbol = tokenInfo.symbol;
@@ -234,18 +300,46 @@ export async function analyzeFourMemeTransaction(
       outputDecimals = 18;
       inputAddress = tokenAddress;
       outputAddress = WBNB_ADDRESS;
-
-      // Calculate BNB out using balance changes
-      externalCallCount += 2; // Two getBalance calls
-      const blockNum = receipt.blockNumber!;
-      const effectiveGasPrice = receipt.gasPrice;
-      const gasFee = receipt.gasUsed * effectiveGasPrice;
-      const balanceBefore = await provider.getBalance(userWallet, blockNum - 1);
-      const balanceAfter = await provider.getBalance(userWallet, blockNum);
-      outputAmount = balanceAfter - balanceBefore + gasFee;
       console.log(
-        `Sell detected: token in ${inputAmount}, BNB out ${outputAmount} (from balance diff and gas fee).`
+        `Sell setup: inputSymbol=${inputSymbol}, outputSymbol=${outputSymbol}, inputDecimals=${inputDecimals}, outputDecimals=${outputDecimals}`
       );
+
+      // FIXED: Parse calldata using sellToken signature (no external call)
+      outputAmount = 0n;
+      try {
+        console.log(
+          `Parsing tx calldata for amountOutMin using sellToken signature (no external call).`
+        );
+        const parsedTx = ROUTER_IFACE.parseTransaction({
+          data: transaction.data,
+        });
+        if (parsedTx && parsedTx.name === "sellToken") {
+          // From analysis: param4 = amountIn (matches transfer.value), param5 = amountOutMin
+          const calldataAmountIn = parsedTx.args.param4 as bigint;
+          const amountOutMin = parsedTx.args.param5 as bigint;
+          if (calldataAmountIn !== inputAmount) {
+            console.warn(
+              `Calldata amountIn (${calldataAmountIn}) does not match transfer (${inputAmount}); using transfer.`
+            );
+          }
+          outputAmount = amountOutMin;
+          console.log(
+            `Calldata parsed: method=sellToken, amountIn (param4)=${calldataAmountIn}, amountOutMin (param5)=${amountOutMin}`
+          );
+          console.log(
+            `Sell detected: token in ${inputAmount}, approx BNB out ${outputAmount} (from calldata amountOutMin). Note: Actual may be slightly higher due to slippage.`
+          );
+        } else {
+          console.warn(`Failed to parse calldata as sellToken; using 0.`);
+        }
+      } catch (parseErr) {
+        console.warn(
+          `Calldata parse failed: ${
+            (parseErr as Error).message
+          }. Using 0 for output.`
+        );
+        outputAmount = 0n;
+      }
     }
 
     const amountInDecimal = parseFloat(
@@ -259,45 +353,52 @@ export async function analyzeFourMemeTransaction(
     );
 
     // --- Price Calculation ---
-    let spotNum = amountOutDecimal > 0 ? amountInDecimal / amountOutDecimal : 0; // input per output
+    let spotNum = 0;
+    let bnbPerToken = 0;
+    console.log(
+      `Price calc inputs: amountInDecimal=${amountInDecimal}, amountOutDecimal=${amountOutDecimal}, isBuy=${isBuy}`
+    );
+    if (amountOutDecimal > 0) {
+      spotNum = amountInDecimal / amountOutDecimal;
+      bnbPerToken = isBuy ? spotNum : 1 / spotNum;
+      console.log(
+        `Price calc successful: spotNum (input/output)=${spotNum}, bnbPerToken=${bnbPerToken}`
+      );
+    } else {
+      console.warn(
+        `Unable to calculate price: output amount is 0. Setting price to 0.`
+      );
+      spotNum = 0;
+      bnbPerToken = 0;
+    }
     console.log(
       `Spot price calculated from amounts: ${spotNum} ${inputSymbol} per ${outputSymbol} (no external call).`
     );
 
     // --- USD CALCULATION ---
+    console.log(`Starting USD calc.`);
     externalCallCount++;
     const bnbUsd = (await fetchBnbPriceUsd()) || 0;
     console.log(`BNB USD price fetched via HTTP (external call).`);
 
     const usdVolume = isBuy
       ? amountInDecimal * bnbUsd
-      : amountOutDecimal * bnbUsd; // Volume in USD
-    let usdPerBaseToken = 0;
-    let baseSymbol = outputSymbol; // Base is the meme token
-    if (isBuy) {
-      // Buy: BNB in, token out -> price = BNB / token * bnbUsd
-      usdPerBaseToken = spotNum * bnbUsd;
-    } else {
-      // Sell: token in, BNB out -> price = BNB / token * bnbUsd
-      usdPerBaseToken = spotNum * bnbUsd;
-    }
+      : amountOutDecimal * bnbUsd;
+    const usdPerBaseToken = bnbPerToken * bnbUsd;
+    const baseSymbol = memeSymbol;
     console.log(
-      `USD volume: ${usdVolume}, USD per ${baseSymbol}: ${usdPerBaseToken} (using BNB price ${bnbUsd}, spot ${spotNum}).`
+      `USD volume: ${usdVolume} ((${
+        isBuy ? amountInDecimal : amountOutDecimal
+      } * ${bnbUsd})), USD per ${baseSymbol}: ${usdPerBaseToken} (bnbPerToken ${bnbPerToken} * bnbUsd ${bnbUsd}) (using BNB price ${bnbUsd}, spot ${spotNum}).`
     );
-    // --- End USD CALCULATION ---
 
     // Standardize native price as BNB per base (meme token)
-    const nativePriceNum = 1 / spotNum; // BNB per token if spot is token per BNB, wait no:
-    // spotNum = input / output
-    // For buy: input BNB / output token -> spotNum = BNB per token
-    // For sell: input token / output BNB -> spotNum = token per BNB -> BNB per token = 1 / spotNum
-    const bnbPerToken = isBuy ? spotNum : 1 / spotNum;
     const quoteSymbol = "BNB";
-    console.log(
-      `Native price: ${formatTinyNum(
-        bnbPerToken
-      )} ${quoteSymbol} per ${baseSymbol} (no external call).`
-    );
+    const nativePriceStr =
+      bnbPerToken > 0
+        ? `${formatTinyNum(bnbPerToken)} ${quoteSymbol} per ${baseSymbol}`
+        : "0 BNB per " + baseSymbol;
+    console.log(`Native price: ${nativePriceStr} (no external call).`);
 
     console.log(`\n--- Formatted Trade ---`);
     console.log(`Pair: ${inputSymbol}/${outputSymbol}`);
@@ -308,9 +409,7 @@ export async function analyzeFourMemeTransaction(
       `Output: ${formatAmount(outputAmount, outputDecimals, outputSymbol)}`
     );
     console.log(
-      `Spot Price: ${formatTinyNum(
-        bnbPerToken
-      )} ${quoteSymbol} per ${baseSymbol} | USD per ${baseSymbol}: ${usdPerBaseToken.toFixed(
+      `Spot Price: ${nativePriceStr} | USD per ${baseSymbol}: ${usdPerBaseToken.toFixed(
         6
       )} | Total Volume: ${usdVolume.toFixed(6)}`
     );
@@ -323,9 +422,7 @@ export async function analyzeFourMemeTransaction(
         txHash,
         timestamp: receipt.blockNumber,
         usdPrice: usdPerBaseToken.toFixed(10),
-        nativePrice: `${formatTinyNum(
-          bnbPerToken
-        )} ${quoteSymbol} per ${baseSymbol}`,
+        nativePrice: nativePriceStr,
         volume: usdVolume.toFixed(10),
         inputVolume: inputAmount.toString(),
         mint: tokenAddress,
@@ -341,6 +438,9 @@ export async function analyzeFourMemeTransaction(
       },
     ];
     console.log(`TradeEvent constructed from parsed data (no external call).`);
+    console.log(
+      `TradeEvent details: type=${tradeEvents[0].type}, volume=${tradeEvents[0].volume}, usdPrice=${tradeEvents[0].usdPrice}`
+    );
 
     // --- Final Output ---
     if (tradeEvents.length > 0) {
@@ -372,9 +472,13 @@ export async function analyzeFourMemeTransaction(
         totalCalls - 1
       }, HTTP: 1)`
     );
+    console.log(
+      `Debug summary: isBuy=${isBuy}, token=${tokenAddress} (${memeSymbol}), input=${amountInDecimal} ${inputSymbol}, output=${amountOutDecimal} ${outputSymbol}, spot=${spotNum}, bnbUsd=${bnbUsd}`
+    );
   } catch (err) {
     console.error(
       `Error analyzing transaction ${txHash}: ${(err as Error).message}`
     );
+    console.error(`Full error stack: ${err}`);
   }
 }

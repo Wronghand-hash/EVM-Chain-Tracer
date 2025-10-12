@@ -8,6 +8,7 @@ import { analyzeBscTransaction } from "./processSwaps/Bsc/uniswapV2&V3";
 import { analyzeTokenCreationBSC } from "./processInfo/bsc/uniswap&pancakeSwap";
 import connectDB from "./config/db";
 import mongoose from "mongoose";
+import { analyzeFourMemeTransaction } from "./processSwaps/Bsc/fourMeme";
 
 dotenv.config();
 
@@ -34,10 +35,11 @@ async function main(): Promise<void> {
     return;
   }
   const txHashes = [
-    "0x72c9d2ac7e932aba2e462e40203becbf84018fe77893eb437742d1c412b19d86",
+    "0xdd177313c40a27ade13ef16d9383688e4a3e5a4968a423e795ac66d1df6cd0ed",
   ];
   for (const txHash of txHashes) {
-    await analyzeTokenCreationBSC(txHash);
+    await analyzeFourMemeTransaction(txHash);
+    // await analyzeTokenCreationBSC(txHash);
     // await analyzeBscTransaction(txHash);
     // await analyzeUniswapV4Pool(txHash);
     // await analyzeTokenCreation(txHash);
