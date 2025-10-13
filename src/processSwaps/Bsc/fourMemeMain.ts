@@ -53,6 +53,8 @@ export const processFourMemes = async (
       TokenPurchase: "TokenPurchase(address,address,uint256,uint256,uint256)",
       TokenPurchase2:
         "TokenPurchase(address ,address ,uint256 ,uint256 ,uint256 ,uint256 ,uint256 ,uint256)",
+      TokenSale:
+        "TokenSale(address,address,uint256,uint256,uint256,uint256,uint256,uint256)",
     };
 
     // const iface = new ethers.utils.Interface(abi);
@@ -91,10 +93,10 @@ export const processFourMemes = async (
           } else if (
             log.topics[0] === ethers.utils.id(eventSignatures.TokenPurchase) ||
             log.topics[0] === ethers.utils.id(eventSignatures.TokenPurchase2) ||
+            log.topics[0] === ethers.utils.id(eventSignatures.TokenSale) ||
             log.topics[0] === fourMemesPurchaseTopic ||
+            log.topics[0] === fourMemesTokenSaleTopic ||
             log.topics[0] === fourMemesTokenCreateTopic
-            // log.topics[0] ===
-            //   "0x0a5575b3648bae2210cee56bf33254cc1ddfbc7bf637c0af2ac18b14fb1bae19" // sell event --- IGNORE ---
           ) {
             iface = new ethers.utils.Interface(abi);
           } else {
@@ -108,6 +110,7 @@ export const processFourMemes = async (
             parsedLog.name === "TokenSale" ||
             parsedLog.name === "TokenCreated"
           ) {
+            const isSale = parsedLog.name === "TokenSale";
             const object = {
               token: parsedLog.args.token,
               account: parsedLog.args.account,
@@ -145,41 +148,46 @@ export const processFourMemes = async (
     );
     console.log({ token });
     if (!token) return;
-    const purchaseData = mappedLogs.find(
+    const eventData = mappedLogs.find(
       (x: any) => x.name === "TokenPurchase" || x.name === "TokenSale"
     );
-    if (!purchaseData) return;
-    console.log({ purchaseData });
+    if (!eventData) return;
+    console.log({ [`${eventData.name}Data`]: eventData });
 
     const amount = parseFloat(
-      ethers.utils.formatUnits(purchaseData.args.costBNB, 18)
+      ethers.utils.formatUnits(eventData.args.costBNB, 18)
     );
     const tokenAmountSum = parseFloat(
-      ethers.utils.formatUnits(purchaseData.args.amountToken, token.decimals)
+      ethers.utils.formatUnits(eventData.args.amountToken, token.decimals)
     );
     const fundsRaised = parseFloat(
-      ethers.utils.formatUnits(purchaseData.args.funds, 18)
+      ethers.utils.formatUnits(eventData.args.funds, 18)
     );
     console.log({ amount, tokenAmountSum, fundsRaised });
     if (amount === 0 || tokenAmountSum === 0) return;
 
+    const usdAmount = amount * bnbPrice;
+    const typeSwap = eventData.name === "TokenSale" ? "sell" : "buy";
+
     let dataObject = {
       tokenAmountSum,
-      spent: amount * bnbPrice,
+      spent: usdAmount,
       raised: fundsRaised,
       basePrice: bnbPrice,
-      price: (amount * bnbPrice) / tokenAmountSum,
+      price: usdAmount / tokenAmountSum,
       nativeAmountSum: amount,
       hash: tx.hash || tx.transactionHash,
       from: tx.from,
       tokenData: token,
-      typeSwap: "buy",
+      typeSwap,
     };
 
     console.log({
       dataObject,
       type: "fourmemesevents",
     });
+
+    return dataObject;
   } catch (err: any) {
     console.error(`[getContributedAmount] -- ${err}`);
   }

@@ -8,6 +8,7 @@ import {
   ITokenAddress,
 } from "./processSwaps/Bsc/fourMemeMain";
 import { ethers } from "ethers";
+import { fetchBnbPriceUsd } from "./utils/bsc/utils";
 
 dotenv.config();
 
@@ -31,7 +32,7 @@ async function processTransaction(txHash: string): Promise<void> {
 
   const provider = new ethers.providers.JsonRpcProvider(providerUrl);
   const chainSymbol = "BSC";
-  const bnbPrice = 550; // Hardcoded BNB price in USD; update as needed or fetch dynamically
+  const bnbPrice = await fetchBnbPriceUsd();
 
   console.log(`Processing tx: ${txHash}`);
   try {
@@ -123,7 +124,7 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0x600cb7a3e9aa5ec439750a9ac84148c11457fb0470a8fef360b460b706836741",
+    "0x095c84d19313528314ce95884edcc8bd0cbd0a161c36a61a11c067dca7fe1474",
   ];
 
   for (const txHash of txHashes) {
