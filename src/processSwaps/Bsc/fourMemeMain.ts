@@ -108,25 +108,48 @@ export const processFourMemes = async (
           if (
             parsedLog.name === "TokenPurchase" ||
             parsedLog.name === "TokenSale" ||
-            parsedLog.name === "TokenCreated"
+            parsedLog.name === "TokenCreate"
           ) {
-            const isSale = parsedLog.name === "TokenSale";
-            const object = {
-              token: parsedLog.args.token,
-              account: parsedLog.args.account,
-              price: parsedLog.args.price?.toString(),
-              amountToken: parsedLog.args.amount?.toString(),
-              costBNB: parsedLog.args.cost?.toString(),
-              fee: parsedLog.args.fee?.toString(),
-              offers: parsedLog.args.offers?.toString(),
-              funds: parsedLog.args.funds?.toString(),
-            };
-            return {
-              address: log.address,
-              ...object,
-              args: object,
-              name: parsedLog.name,
-            };
+            if (
+              parsedLog.name === "TokenPurchase" ||
+              parsedLog.name === "TokenSale"
+            ) {
+              const isSale = parsedLog.name === "TokenSale";
+              const object = {
+                token: parsedLog.args.token,
+                account: parsedLog.args.account,
+                price: parsedLog.args.price?.toString(),
+                amountToken: parsedLog.args.amount?.toString(),
+                costBNB: parsedLog.args.cost?.toString(),
+                fee: parsedLog.args.fee?.toString(),
+                offers: parsedLog.args.offers?.toString(),
+                funds: parsedLog.args.funds?.toString(),
+              };
+              return {
+                address: log.address,
+                ...object,
+                args: object,
+                name: parsedLog.name,
+              };
+            } else if (parsedLog.name === "TokenCreate") {
+              console.log(parsedLog.args.name, "nigs");
+              const object = {
+                creator: parsedLog.args.creator,
+                token: parsedLog.args.token,
+                requestId: parsedLog.args.requestId?.toString(),
+                name: parsedLog.args.name,
+                symbol: parsedLog.args.symbol,
+                totalSupply: parsedLog.args.totalSupply?.toString(),
+                launchTime: parsedLog.args.launchTime?.toString(),
+                launchFee: parsedLog.args.launchFee?.toString(),
+              };
+              return {
+                address: log.address,
+                ...object,
+                args: object,
+                event: parsedLog.name,
+              };
+            }
           }
           return {
             address: log.address,

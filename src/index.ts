@@ -124,7 +124,7 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0x095c84d19313528314ce95884edcc8bd0cbd0a161c36a61a11c067dca7fe1474",
+    "0xf391a75b5280f3333ac69c7dfb87db91d0a511afe29131a3f2cba4ef2c9f5b35",
   ];
 
   for (const txHash of txHashes) {
