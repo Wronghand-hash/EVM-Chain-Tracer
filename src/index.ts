@@ -9,6 +9,7 @@ import {
 } from "./processSwaps/Bsc/fourMemeMain";
 import { ethers } from "ethers";
 import { fetchBnbPriceUsd } from "./utils/bsc/utils";
+import { processPancake } from "./processSwaps/Bsc/uniswap";
 
 dotenv.config();
 
@@ -108,7 +109,8 @@ async function processTransaction(txHash: string): Promise<void> {
     ];
 
     // Call the function with required arguments
-    await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
+    // await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
+    await processPancake(tokensAddress, logs, tx, chainSymbol, bnbPrice);
   } catch (e) {
     console.error(`Error processing ${txHash}:`, e);
   }
@@ -124,7 +126,7 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0xf391a75b5280f3333ac69c7dfb87db91d0a511afe29131a3f2cba4ef2c9f5b35",
+    "0x8013c43a51ddb7f7dc20db332404ba37db4773d0dad13e7ab38d84c6daa942c5",
   ];
 
   for (const txHash of txHashes) {
