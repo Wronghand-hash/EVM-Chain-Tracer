@@ -249,11 +249,11 @@ async function processTransaction(txHash: string): Promise<void> {
     ];
 
     // Call the function with required arguments
-    // await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
-    await processPancakeTokenCreate(providerUrl, async (pairInfo) => {
-      // You can insert DB saving or Telegram alert logic here
-      console.log("🔥 Detected new pair creation:", pairInfo);
-    });
+    await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
+    // await processPancakeTokenCreate(providerUrl, async (pairInfo) => {
+    //   // You can insert DB saving or Telegram alert logic here
+    //   console.log("🔥 Detected new pair creation:", pairInfo);
+    // });
   } catch (e) {
     console.error(`Error processing ${txHash}:`, e);
   }
@@ -269,7 +269,7 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0xa8d8f84609e1f50c20db974a48f0208e5f8de34b03d35715d6d794ba2f0a7274",
+    "0x33ae453268c454ab2a8b81611965da028e69eb451d30571d74913ebab0cc484c",
   ];
 
   for (const txHash of txHashes) {

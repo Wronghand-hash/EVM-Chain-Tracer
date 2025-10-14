@@ -21,30 +21,35 @@ const getSender = async (): Promise<Sender> => {
 // Optional: Create table explicitly via REST API (assumes QuestDB REST at http://localhost:9000)
 const createTokenInfoTable = async (): Promise<void> => {
   try {
-    const response = await fetch("http://localhost:9000/exec", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `
-          CREATE TABLE IF NOT EXISTS token_infos (
-            address SYMBOL INDEX,
-            symbol SYMBOL,
-            name STRING,
-            timestamp TIMESTAMP
-          ) TIMESTAMP(timestamp) PARTITION BY NONE
-        `,
-      }),
-    });
+    const sql = `
+      CREATE TABLE IF NOT EXISTS token_infos (
+        address SYMBOL INDEX,
+        symbol SYMBOL,
+        name STRING,
+        timestamp TIMESTAMP
+      ) TIMESTAMP(timestamp) PARTITION BY NONE
+    `;
+    const params = new URLSearchParams();
+    params.append("query", sql);
+    const response = await fetch(
+      `http://localhost:9000/exec?${params.toString()}`,
+      {
+        method: "GET",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }
+    );
     if (!response.ok) {
       throw new Error(`Failed to create table: ${await response.text()}`);
     }
-    console.log("TokenInfos table ensured.");
+    const result = await response.json();
+    console.log("TokenInfos table ensured:", result);
   } catch (err) {
-    console.error("Table creation error:", err);
+    console.error("Table creation error (non-blocking):", err);
     // Tables auto-create on first insert with inferred types, so this is optional
   }
 };
 
+// Insert a new token info (auto-creates table if not exists)
 export const createTokenInfo = async (
   data: Omit<ITokenInfo, "createdAt" | "updatedAt">
 ): Promise<ITokenInfo> => {
@@ -69,19 +74,28 @@ export const createTokenInfo = async (
   };
 };
 
+// Find token info by address (via REST API query)
 export const findTokenInfoByAddress = async (
   address: string
 ): Promise<ITokenInfo | null> => {
   try {
     const queryAddress = address.toLowerCase();
+    const params = new URLSearchParams();
+    params.append(
+      "query",
+      `SELECT address, symbol, name, timestamp FROM token_infos WHERE address = '${queryAddress}' LIMIT 1`
+    );
     const response = await fetch(
-      `http://localhost:9000/exec?query=SELECT address, symbol, name, timestamp FROM token_infos WHERE address = '${queryAddress}' LIMIT 1`
+      `http://localhost:9000/exec?${params.toString()}`,
+      {
+        method: "GET",
+      }
     );
     if (!response.ok) {
       throw new Error(`Query failed: ${await response.text()}`);
     }
     const result = await response.json();
-    if (result.data.length === 0) {
+    if (result.data?.length === 0) {
       return null;
     }
     const [addr, sym, nam, tsStr] = result.data[0];
@@ -99,19 +113,31 @@ export const findTokenInfoByAddress = async (
   }
 };
 
+// For updates, since QuestDB is append-only, use SQL UPSERT or delete+insert.
+// Example: upsert via SQL
 export const updateTokenInfo = async (
   address: string,
   data: Partial<Omit<ITokenInfo, "address" | "createdAt" | "updatedAt">>
 ): Promise<ITokenInfo | null> => {
   const existing = await findTokenInfoByAddress(address);
   if (!existing) return null;
-  await fetch("http://localhost:9000/exec", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query: `DELETE FROM token_infos WHERE address = '${address.toLowerCase()}'`,
-    }),
-  });
+  // For simplicity, delete and re-insert (inefficient for large scale)
+  try {
+    const deleteParams = new URLSearchParams();
+    deleteParams.append(
+      "query",
+      `DELETE FROM token_infos WHERE address = '${address.toLowerCase()}'`
+    );
+    const deleteRes = await fetch(
+      `http://localhost:9000/exec?${deleteParams.toString()}`,
+      { method: "GET" }
+    );
+    if (!deleteRes.ok) {
+      console.error("Delete failed:", await deleteRes.text());
+    }
+  } catch (err) {
+    console.error("Delete error:", err);
+  }
   const newData = {
     address,
     symbol: existing.symbol,
@@ -121,6 +147,7 @@ export const updateTokenInfo = async (
   return { ...created, updatedAt: new Date() };
 };
 
+// Close connection when done (e.g., in app shutdown)
 export const closeDB = async (): Promise<void> => {
   if (sender) {
     await sender.close();
