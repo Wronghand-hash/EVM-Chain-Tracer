@@ -10,6 +10,7 @@ import {
 import { ethers } from "ethers";
 import { fetchBnbPriceUsd } from "./utils/bsc/utils";
 import { processPancakeTokenCreate } from "./processSwaps/Bsc/uniswap";
+import { poolCreationUniswapV3 } from "./processInfo/uniswapV3FactoryPoolCreation";
 
 dotenv.config();
 
@@ -269,11 +270,13 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0x33ae453268c454ab2a8b81611965da028e69eb451d30571d74913ebab0cc484c",
+    "0xd483874a1cfcb286e5294712baadf1268b9d0b35d4fe9ab66b4fa2deebf717b5",
   ];
 
   for (const txHash of txHashes) {
-    await processTransaction(txHash);
+    // await processTransaction(txHash);
+    // await analyzeTokenCreationBSC(txHash);
+    await poolCreationUniswapV3(txHash);
     console.log("\n" + "=".repeat(80) + "\n");
   }
 
