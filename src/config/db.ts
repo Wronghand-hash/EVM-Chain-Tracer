@@ -1,16 +1,21 @@
-import mongoose from "mongoose";
+import { Sender } from "@questdb/nodejs-client";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const connectDB = async (): Promise<void> => {
+let sender: Sender | null = null;
+
+const connectDB = async (): Promise<Sender> => {
+  if (sender) {
+    return sender; // Reuse existing connection
+  }
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI || "", {
-      dbName: process.env.DB_NAME || "evm_tracer",
-    });
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
+    const config = process.env.QUESTDB_CONFIG || "http::addr=localhost:9000";
+    sender = await Sender.fromConfig(config);
+    console.log(`QuestDB Connected via: ${config}`);
+    return sender;
   } catch (err) {
-    console.error(err);
+    console.error("QuestDB Connection Error:", err);
     process.exit(1);
   }
 };

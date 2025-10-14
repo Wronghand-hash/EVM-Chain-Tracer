@@ -13,6 +13,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@questdb/nodejs-client": "^4.0.2",
     "@types/node": "^24.5.2",
     "abi-decoder": "^2.4.0",
     "axios": "^1.12.2",

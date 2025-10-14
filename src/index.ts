@@ -9,7 +9,7 @@ import {
 } from "./processSwaps/Bsc/fourMemeMain";
 import { ethers } from "ethers";
 import { fetchBnbPriceUsd } from "./utils/bsc/utils";
-import { processPancake } from "./processSwaps/Bsc/uniswap";
+import { processPancakeTokenCreate } from "./processSwaps/Bsc/uniswap";
 
 dotenv.config();
 
@@ -51,45 +51,185 @@ async function processTransaction(txHash: string): Promise<void> {
 
     const logs = receipt.logs;
 
-    // Identify potential token addresses (exclude known factory)
-    const factoryAddress =
-      "0x5c952063c7fc8610ffdb798152d69f0b9550762b".toLowerCase();
-    const potentialTokenAddresses = [
-      ...new Set(
-        logs
-          .map((log: any) => log.address.toLowerCase())
-          .filter((addr) => addr !== factoryAddress)
-      ),
-    ];
+    // Identify potential token addresses from logs and filter out known infra
+    const EXCLUDED_ADDRESSES = new Set(
+      [
+        // Pancake V2/V3 factories
+        "0xca143ce32fe78f1f7019d7d551a6402fc5350c73", // V2 factory
+        "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865", // V3 factory
+        // Routers and well-known infra (can expand as needed)
+        "0xb971ef87ede563556b2ed4b1c0b0019111dd85d2", // Swap Router 02
+        "0x7b8a01b39d58278b5de7e48c8449c9f4f5170613", // NF Position Manager
+        "0x78d78e420da98ad378d7799be8f4af69033eb077", // Quoter V2
+        "0x1906c1d672b88cd1b9ac7593301ca990f94eae07", // Universal Router
+      ].map((a) => a.toLowerCase())
+    );
 
-    if (potentialTokenAddresses.length === 0) {
-      console.log("No potential tokens found");
-      return;
+    const candidateAddresses = [
+      ...new Set(logs.map((log: any) => log.address.toLowerCase())),
+    ].filter((addr) => !EXCLUDED_ADDRESSES.has(addr));
+
+    if (candidateAddresses.length === 0) {
+      console.log(
+        "No potential tokens from log addresses; will try parsing creation events."
+      );
     }
 
-    // Use the first potential token (adjust if multiple expected)
-    const tokenAddress = potentialTokenAddresses[0];
-
-    // Fetch token details
+    // Try to detect a valid ERC20 among candidates
     const tokenAbi = [
       "function decimals() view returns (uint8)",
       "function totalSupply() view returns (uint256)",
     ];
-    const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
+    let tokenAddress: string | undefined;
+    let decimals: number | undefined;
+    let totalSupplyStr: string | undefined;
 
-    let decimals: number, totalSupply: string;
-    try {
-      decimals = await tokenContract.decimals();
-      totalSupply = (await tokenContract.totalSupply()).toString();
-    } catch (e) {
-      console.error("Failed to fetch token info:", e);
-      return;
+    for (const addr of candidateAddresses) {
+      try {
+        const code = await provider.getCode(addr);
+        if (!code || code === "0x") continue; // not a contract
+
+        const tokenContract = new ethers.Contract(addr, tokenAbi, provider);
+        const [dec, ts] = await Promise.all([
+          tokenContract.decimals(),
+          tokenContract.totalSupply(),
+        ]);
+        tokenAddress = addr;
+        decimals = dec;
+        totalSupplyStr = ts.toString();
+        break;
+      } catch (err) {
+        // Not an ERC20; continue searching
+        continue;
+      }
+    }
+
+    if (!tokenAddress || decimals === undefined || !totalSupplyStr) {
+      // Fallback: parse PairCreated/PoolCreated to extract token0/token1 and try them
+      const pairCreatedSig = "PairCreated(address,address,address,uint256)";
+      const poolCreatedSig =
+        "PoolCreated(address,address,uint24,int24,address)";
+      const pairIface = new ethers.utils.Interface([`event ${pairCreatedSig}`]);
+      const poolIface = new ethers.utils.Interface([`event ${poolCreatedSig}`]);
+
+      const creationTokenAddrs: string[] = [];
+      for (const log of logs) {
+        try {
+          if (log.topics[0] === ethers.utils.id(pairCreatedSig)) {
+            const parsed = pairIface.parseLog(log);
+            creationTokenAddrs.push(parsed.args.token0.toLowerCase());
+            creationTokenAddrs.push(parsed.args.token1.toLowerCase());
+          } else if (log.topics[0] === ethers.utils.id(poolCreatedSig)) {
+            const parsed = poolIface.parseLog(log);
+            creationTokenAddrs.push(parsed.args.token0.toLowerCase());
+            creationTokenAddrs.push(parsed.args.token1.toLowerCase());
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      const uniqueCreationAddrs = [...new Set(creationTokenAddrs)].filter(
+        (a) => !EXCLUDED_ADDRESSES.has(a)
+      );
+
+      for (const addr of uniqueCreationAddrs) {
+        try {
+          const code = await provider.getCode(addr);
+          if (!code || code === "0x") continue;
+          const tokenContract = new ethers.Contract(addr, tokenAbi, provider);
+          const [dec, ts] = await Promise.all([
+            tokenContract.decimals(),
+            tokenContract.totalSupply(),
+          ]);
+          tokenAddress = addr;
+          decimals = dec;
+          totalSupplyStr = ts.toString();
+          break;
+        } catch {
+          continue;
+        }
+      }
+
+      if (!tokenAddress || decimals === undefined || !totalSupplyStr) {
+        // Second fallback: parse Swap logs to find pair/pool, then query token0/token1
+        const swapV2Sig =
+          "Swap(address,uint256,uint256,uint256,uint256,address)";
+        const swapV3Sig =
+          "Swap(address,address,int256,int256,uint160,uint128,int24)";
+        const pairAbi = [
+          "function token0() view returns (address)",
+          "function token1() view returns (address)",
+        ];
+
+        // Gather candidate pair/pool addresses from swap logs
+        const pairAddresses = new Set<string>();
+        for (const log of logs) {
+          const topic0 = log.topics?.[0];
+          if (!topic0) continue;
+          if (
+            topic0 === ethers.utils.id(swapV2Sig) ||
+            topic0 === ethers.utils.id(swapV3Sig)
+          ) {
+            pairAddresses.add(log.address.toLowerCase());
+          }
+        }
+
+        const wbnb = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"; // lowercase
+
+        outer: for (const pairAddr of pairAddresses) {
+          try {
+            const code = await provider.getCode(pairAddr);
+            if (!code || code === "0x") continue;
+            const pair = new ethers.Contract(pairAddr, pairAbi, provider);
+            const [t0, t1] = await Promise.all([pair.token0(), pair.token1()]);
+            const tokenCandidates = [t0.toLowerCase(), t1.toLowerCase()];
+
+            // Prefer non-WBNB token if present
+            const ordered = tokenCandidates.sort((a, b) =>
+              a === wbnb ? 1 : b === wbnb ? -1 : 0
+            );
+
+            for (const cand of ordered) {
+              if (EXCLUDED_ADDRESSES.has(cand)) continue;
+              try {
+                const codeT = await provider.getCode(cand);
+                if (!codeT || codeT === "0x") continue;
+                const tokenContract = new ethers.Contract(
+                  cand,
+                  tokenAbi,
+                  provider
+                );
+                const [dec, ts] = await Promise.all([
+                  tokenContract.decimals(),
+                  tokenContract.totalSupply(),
+                ]);
+                tokenAddress = cand;
+                decimals = dec;
+                totalSupplyStr = ts.toString();
+                break outer;
+              } catch {
+                continue;
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+
+        if (!tokenAddress || decimals === undefined || !totalSupplyStr) {
+          console.error(
+            "Failed to discover a valid ERC20 token via addresses, creation or swap events; aborting."
+          );
+          return;
+        }
+      }
     }
 
     const tokensAddress: ITokenAddress[] = [
       {
         tokenAddress,
-        totalSupply: Number(totalSupply), // Convert to number if needed; adjust based on ITokenAddress
+        totalSupply: Number(totalSupplyStr),
         decimals,
         pairAddress: "",
         price: "0",
@@ -110,7 +250,10 @@ async function processTransaction(txHash: string): Promise<void> {
 
     // Call the function with required arguments
     // await processFourMemes(tokensAddress, logs, tx, chainSymbol, bnbPrice);
-    await processPancake(tokensAddress, logs, tx, chainSymbol, bnbPrice);
+    await processPancakeTokenCreate(providerUrl, async (pairInfo) => {
+      // You can insert DB saving or Telegram alert logic here
+      console.log("🔥 Detected new pair creation:", pairInfo);
+    });
   } catch (e) {
     console.error(`Error processing ${txHash}:`, e);
   }
@@ -126,7 +269,7 @@ async function main(): Promise<void> {
 
   // Hardcoded tx hash
   const txHashes = [
-    "0x8013c43a51ddb7f7dc20db332404ba37db4773d0dad13e7ab38d84c6daa942c5",
+    "0xa8d8f84609e1f50c20db974a48f0208e5f8de34b03d35715d6d794ba2f0a7274",
   ];
 
   for (const txHash of txHashes) {
