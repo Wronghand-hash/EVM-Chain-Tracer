@@ -1,4 +1,4 @@
-import { Interface, ethers } from "ethers";
+import { ethers } from "ethers";
 import { TokenInfo } from "./types";
 import * as uniswapV4PoolManagerAbi from "../../abi/Etherium/uniswapV4PoolManager.json";
 import dotenv from "dotenv";
@@ -15,7 +15,7 @@ export const UNISWAP_V4_POOL_MANAGER_ADDRESS =
   "0x000000000004444c5dc75cb358380d2e3de08a90";
 export const V4_SWAP_EVENT_TOPIC =
   "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
-export const v4SwapIface = new Interface(uniswapV4PoolManagerAbi);
+export const v4SwapIface = new ethers.utils.Interface(uniswapV4PoolManagerAbi);
 
 export const erc20TransferAbi = [
   "event Transfer(address indexed from, address indexed to, uint256 value)",
@@ -28,7 +28,7 @@ export const poolAbi = [
 
 export const V2_SYNC_EVENT_TOPIC =
   "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1";
-export const v2SyncIface = new Interface([
+export const v2SyncIface = new ethers.utils.Interface([
   "event Sync(uint112 reserve0, uint112 reserve1)",
 ]);
 
@@ -128,7 +128,10 @@ export const provider = (() => {
   if (!process.env.PROVIDER_URL) {
     throw new Error("PROVIDER_URL not set in .env file");
   }
-  const provider = new ethers.JsonRpcProvider(process.env.PROVIDER_URL);
+  // Ethers v5 Legacy
+  const provider = new ethers.providers.JsonRpcProvider(
+    process.env.PROVIDER_URL
+  );
   provider.getNetwork().catch(() => {
     throw new Error(
       "Failed to connect to the Ethereum node. Check PROVIDER_URL or node status."
@@ -148,13 +151,15 @@ export const WETH_ADDRESS =
 export const UNISWAP_UNIVERSAL_ROUTER_ADDRESS =
   "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD".toLowerCase();
 
-export const v2SwapIface = new Interface(v2SwapAbi);
-export const v3SwapIface = new Interface(v3SwapAbi);
-export const transferIface = new Interface(erc20TransferAbi);
+// Ethers v5 Legacy
 
-export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEvent("Swap")?.topicHash;
-export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEvent("Swap")?.topicHash;
-export const TRANSFER_TOPIC = transferIface.getEvent("Transfer")?.topicHash;
+export const v2SwapIface = new ethers.utils.Interface(v2SwapAbi);
+export const v3SwapIface = new ethers.utils.Interface(v3SwapAbi);
+export const transferIface = new ethers.utils.Interface(erc20TransferAbi);
+
+export const V2_SWAP_EVENT_TOPIC = v2SwapIface.getEventTopic("Swap");
+export const V3_SWAP_EVENT_TOPIC = v3SwapIface.getEventTopic("Swap");
+export const TRANSFER_TOPIC = transferIface.getEventTopic("Transfer");
 
 // version 4 uniswap token creation
 

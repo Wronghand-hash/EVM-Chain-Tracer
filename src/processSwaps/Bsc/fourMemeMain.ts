@@ -1,4 +1,6 @@
 import { ethers } from "ethers";
+import * as TokenInfoDB from "../../models/tokenInfo.schema";
+import { provider } from "../../types/Bsc/constants";
 
 export const fourMemesPurchaseTopic =
   "0x7db52723a3b2cdd6164364b3b766e65e540d7be48ffa89582956d8eaebe62942";
@@ -36,6 +38,9 @@ export enum pairs {
   ASTER = "0x000ae314e2a2172a039b26378814c252734f556a",
   CAKE = "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
 }
+
+const ERC20_ABI = ["function decimals() view returns (uint8)"];
+
 export const processFourMemes = async (
   tokensAddress: ITokenAddress[],
   logs: any,
@@ -58,8 +63,8 @@ export const processFourMemes = async (
     };
 
     // const iface = new ethers.utils.Interface(abi);
-    const mappedLogs = logs
-      .map((log: any) => {
+    const mappedLogs = await Promise.all(
+      logs.map(async (log: any) => {
         try {
           let iface;
           if (log.topics[0] === ethers.utils.id(eventSignatures.Transfer)) {
@@ -143,6 +148,22 @@ export const processFourMemes = async (
                 launchTime: parsedLog.args.launchTime?.toString(),
                 launchFee: parsedLog.args.launchFee?.toString(),
               };
+              const tokenAddress = object.token.toLowerCase();
+
+              // Store to DB
+              try {
+                await TokenInfoDB.createTokenInfo({
+                  address: tokenAddress,
+                  symbol: object.symbol.toUpperCase(),
+                  name: object.name,
+                });
+                console.log(`Stored token info for ${tokenAddress}`);
+              } catch (dbErr) {
+                console.error(
+                  `Failed to store token info for ${tokenAddress}:`,
+                  dbErr
+                );
+              }
               return {
                 address: log.address,
                 ...object,
@@ -160,8 +181,11 @@ export const processFourMemes = async (
           return undefined;
         }
       })
-      .filter((x: any) => x && x);
-    console.log({ mappedLogs });
+    );
+    const filteredLogs = mappedLogs.filter((x: any) => x && x);
+    console.log({ mappedLogs: filteredLogs });
+
+    if (filteredLogs.length !== 2) return null;
 
     if (mappedLogs.length !== 2) return;
 
