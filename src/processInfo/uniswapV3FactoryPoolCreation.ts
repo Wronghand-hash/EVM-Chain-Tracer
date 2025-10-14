@@ -1,3 +1,4 @@
+// Updated uniswapV3FactoryPoolCreation.ts
 import { ethers } from "ethers";
 import {
   provider,
@@ -6,6 +7,10 @@ import {
 } from "../types/Bsc/constants";
 import { formatAmount } from "../utils/bsc/utils";
 import { Transfer } from "../types/Etherium/types";
+import {
+  createPoolCreation,
+  IPoolCreation,
+} from "../models/poolCreation.schema";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const DEFAULT_DECIMALS = 18;
@@ -344,6 +349,21 @@ export async function poolCreationUniswapV3(txHash: string): Promise<void> {
           console.log(`Contract/Factory ID:   ${finalData.programId}`);
           console.log(`Creator/Initiator:     ${finalData.creatorAddress}`);
           console.log(`Transaction Hash:      ${finalData.hash}`);
+          // Store in DB
+          const dbData: IPoolCreation = {
+            hash: finalData.hash!,
+            tokenMint: finalData.tokenMint!,
+            creatorAddress: finalData.creatorAddress!,
+            programId: finalData.programId!,
+            tokenBalanceChanges: finalData.tokenBalanceChanges!,
+            tokenChanges: finalData.tokenChanges!,
+            totalSupply: finalData.totalSupply!,
+            liquidityAdded: finalData.liquidityAdded!,
+            txType: finalData.txType!,
+            poolAddress: finalData.poolAddress!,
+            liquidityAmounts: finalData.liquidityAmounts!,
+          };
+          await createPoolCreation(dbData);
           return;
         }
       } catch {}
@@ -394,6 +414,24 @@ export async function poolCreationUniswapV3(txHash: string): Promise<void> {
             console.log(`Contract/Factory ID:   ${finalData.programId}`);
             console.log(`Creator/Initiator:     ${finalData.creatorAddress}`);
             console.log(`Transaction Hash:      ${finalData.hash}`);
+            // Store in DB
+            const dbData: IPoolCreation = {
+              hash: finalData.hash!,
+              tokenMint: finalData.tokenMint!,
+              creatorAddress: finalData.creatorAddress!,
+              programId: finalData.programId!,
+              tokenBalanceChanges: finalData.tokenBalanceChanges!,
+              tokenChanges: finalData.tokenChanges!,
+              totalSupply: finalData.totalSupply!,
+              liquidityAdded: finalData.liquidityAdded!,
+              txType: finalData.txType!,
+              poolAddress: finalData.poolAddress || "",
+              liquidityAmounts: finalData.liquidityAmounts || {
+                token0: "",
+                token1: "",
+              },
+            };
+            await createPoolCreation(dbData);
             return; // Early exit
           }
         } catch {}
@@ -447,6 +485,24 @@ export async function poolCreationUniswapV3(txHash: string): Promise<void> {
             console.log(`Contract/Factory ID:   ${finalData.programId}`);
             console.log(`Creator/Initiator:     ${finalData.creatorAddress}`);
             console.log(`Transaction Hash:      ${finalData.hash}`);
+            // Store in DB
+            const dbData: IPoolCreation = {
+              hash: finalData.hash!,
+              tokenMint: finalData.tokenMint!,
+              creatorAddress: finalData.creatorAddress!,
+              programId: finalData.programId!,
+              tokenBalanceChanges: finalData.tokenBalanceChanges!,
+              tokenChanges: finalData.tokenChanges!,
+              totalSupply: finalData.totalSupply!,
+              liquidityAdded: finalData.liquidityAdded!,
+              txType: finalData.txType!,
+              poolAddress: finalData.poolAddress || "",
+              liquidityAmounts: finalData.liquidityAmounts || {
+                token0: "",
+                token1: "",
+              },
+            };
+            await createPoolCreation(dbData);
             return; // Early exit
           }
         } catch {}
@@ -512,6 +568,25 @@ export async function poolCreationUniswapV3(txHash: string): Promise<void> {
     console.log(`Contract/Factory ID:   ${finalData.programId}`);
     console.log(`Creator/Initiator:     ${finalData.creatorAddress}`);
     console.log(`Transaction Hash:      ${finalData.hash}`);
+
+    // Store in DB (fallback for non-constructor cases)
+    const dbData: IPoolCreation = {
+      hash: finalData.hash!,
+      tokenMint: finalData.tokenMint!,
+      creatorAddress: finalData.creatorAddress!,
+      programId: finalData.programId!,
+      tokenBalanceChanges: finalData.tokenBalanceChanges || "",
+      tokenChanges: finalData.tokenChanges || { from: "", to: "", value: "" },
+      totalSupply: finalData.totalSupply || "",
+      liquidityAdded: finalData.liquidityAdded!,
+      txType: finalData.txType!,
+      poolAddress: finalData.poolAddress || "",
+      liquidityAmounts: finalData.liquidityAmounts || {
+        token0: "",
+        token1: "",
+      },
+    };
+    await createPoolCreation(dbData);
   } catch (err) {
     console.error(
       `Error analyzing transaction ${txHash}: ${(err as Error).message}`
