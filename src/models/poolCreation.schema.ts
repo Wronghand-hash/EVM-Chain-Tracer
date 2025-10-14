@@ -1,4 +1,3 @@
-// poolCreation.schema.ts
 import { Sender } from "@questdb/nodejs-client";
 import connectDB from "../config/db";
 
@@ -33,7 +32,7 @@ const getSender = async (): Promise<Sender> => {
 
 const createPoolCreationTable = async (): Promise<void> => {
   try {
-    // One-time: Uncomment to drop existing non-WAL table (run once, then comment out)
+    // Uncommented for one-time drop after config change (comment back after successful run)
     const dropSql = `DROP TABLE IF EXISTS pool_creations`;
     const dropParams = new URLSearchParams();
     dropParams.append("query", dropSql);
@@ -46,7 +45,7 @@ const createPoolCreationTable = async (): Promise<void> => {
     }
 
     const sql = `
-      CREATE TABLE pool_creations (
+      CREATE TABLE IF NOT EXISTS pool_creations (
         hash SYMBOL INDEX,
         tokenMint SYMBOL,
         creatorAddress SYMBOL,
@@ -62,7 +61,7 @@ const createPoolCreationTable = async (): Promise<void> => {
         liquidityToken0 STRING,
         liquidityToken1 STRING,
         timestamp TIMESTAMP
-      ) TIMESTAMP(timestamp) PARTITION BY NONE
+      ) TIMESTAMP(timestamp) PARTITION BY NONE WITH wal
     `;
     const params = new URLSearchParams();
     params.append("query", sql);
@@ -77,7 +76,7 @@ const createPoolCreationTable = async (): Promise<void> => {
       throw new Error(`Failed to create table: ${await response.text()}`);
     }
     const result = await response.json();
-    console.log("PoolCreations WAL table ensured:", result);
+    console.log("PoolCreations table ensured:", result);
   } catch (err) {
     console.error("Table creation error (non-blocking):", err);
   }

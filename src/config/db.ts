@@ -10,7 +10,7 @@ const connectDB = async (): Promise<Sender> => {
     return sender;
   }
   try {
-    const config = process.env.QUESTDB_CONFIG || "http::addr=127.0.0.1:9000";
+    const config = process.env.QUESTDB_CONFIG || "http://127.0.0.1:9000";
     sender = await Sender.fromConfig(config);
     console.log(`QuestDB Connected via: ${config}`);
     return sender;
