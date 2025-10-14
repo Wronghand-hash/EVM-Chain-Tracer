@@ -1,5 +1,5 @@
 import { Sender } from "@questdb/nodejs-client";
-import connectDB from "../config/db"; // Adjust path as needed
+import connectDB from "../config/db";
 
 export interface ITokenInfo {
   address: string;
@@ -18,7 +18,6 @@ const getSender = async (): Promise<Sender> => {
   return sender;
 };
 
-// Optional: Create table explicitly via REST API (assumes QuestDB REST at http://localhost:9000)
 const createTokenInfoTable = async (): Promise<void> => {
   try {
     const sql = `
@@ -45,15 +44,13 @@ const createTokenInfoTable = async (): Promise<void> => {
     console.log("TokenInfos table ensured:", result);
   } catch (err) {
     console.error("Table creation error (non-blocking):", err);
-    // Tables auto-create on first insert with inferred types, so this is optional
   }
 };
 
-// Insert a new token info (auto-creates table if not exists)
 export const createTokenInfo = async (
   data: Omit<ITokenInfo, "createdAt" | "updatedAt">
 ): Promise<ITokenInfo> => {
-  await createTokenInfoTable(); // Ensure table exists with proper schema
+  await createTokenInfoTable();
   const s = await getSender();
   const ts = Date.now();
   const processedData = {
@@ -74,7 +71,6 @@ export const createTokenInfo = async (
   };
 };
 
-// Find token info by address (via REST API query)
 export const findTokenInfoByAddress = async (
   address: string
 ): Promise<ITokenInfo | null> => {
