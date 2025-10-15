@@ -1,3 +1,4 @@
+// poolCreation.schema.ts (for one-time WAL migration)
 import { Sender } from "@questdb/nodejs-client";
 import connectDB from "../config/db";
 
@@ -61,7 +62,7 @@ const createPoolCreationTable = async (): Promise<void> => {
         liquidityToken0 STRING,
         liquidityToken1 STRING,
         timestamp TIMESTAMP
-      ) TIMESTAMP(timestamp) PARTITION BY NONE WITH wal
+      ) TIMESTAMP(timestamp) PARTITION BY NONE
     `;
     const params = new URLSearchParams();
     params.append("query", sql);
