@@ -319,7 +319,7 @@ export async function pairCreationPancakeSwapV2(txHash: string): Promise<void> {
             tokenBalanceChanges: finalData.tokenBalanceChanges!,
             tokenChanges: finalData.tokenChanges!,
             totalSupply: finalData.totalSupply!,
-            liquidityAdded: finalData.liquidityAdded!,
+            liquidityAdded: finalData.liquidityAdded ? "true" : "false",
             txType: finalData.txType!,
             poolAddress: finalData.poolAddress!,
             liquidityAmounts: finalData.liquidityAmounts!,
@@ -410,7 +410,7 @@ export async function pairCreationPancakeSwapV2(txHash: string): Promise<void> {
               tokenBalanceChanges: finalData.tokenBalanceChanges!,
               tokenChanges: finalData.tokenChanges!,
               totalSupply: finalData.totalSupply!,
-              liquidityAdded: finalData.liquidityAdded!,
+              liquidityAdded: finalData.liquidityAdded ? "true" : "false",
               txType: finalData.txType!,
               poolAddress: finalData.poolAddress || "",
               liquidityAmounts: finalData.liquidityAmounts || {
@@ -507,7 +507,7 @@ export async function pairCreationPancakeSwapV2(txHash: string): Promise<void> {
               tokenBalanceChanges: finalData.tokenBalanceChanges!,
               tokenChanges: finalData.tokenChanges!,
               totalSupply: finalData.totalSupply!,
-              liquidityAdded: finalData.liquidityAdded!,
+              liquidityAdded: finalData.liquidityAdded ? "true" : "false",
               txType: finalData.txType!,
               poolAddress: finalData.poolAddress || "",
               liquidityAmounts: finalData.liquidityAmounts || {
@@ -604,7 +604,7 @@ export async function pairCreationPancakeSwapV2(txHash: string): Promise<void> {
       tokenBalanceChanges: finalData.tokenBalanceChanges || "",
       tokenChanges: finalData.tokenChanges || { from: "", to: "", value: "" },
       totalSupply: finalData.totalSupply || "",
-      liquidityAdded: finalData.liquidityAdded!,
+      liquidityAdded: finalData.liquidityAdded ? "true" : "false",
       txType: finalData.txType!,
       poolAddress: finalData.poolAddress || "",
       liquidityAmounts: finalData.liquidityAmounts || {
